@@ -588,6 +588,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "flood_after" : None,
             "path_hash_mode": None,
             "default_scope": None,
+            "wifi": None,
         },
         "get" : {"name":None,
             "bat":None,
@@ -2252,6 +2253,15 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(f"Error : {res}")
                         else:
                             print("Default scope set")
+                    case "wifi":  # beebo: set WiFi credentials in NodePrefs, then reboot
+                        argnum = 3
+                        ssid = cmds[2]
+                        pwd  = cmds[3]
+                        res = await mc.commands.set_wifi_creds(ssid, pwd)
+                        if res.type == EventType.ERROR:
+                            print(f"Error: {res}")
+                        else:
+                            print(f"WiFi credentials saved ({ssid}). Board is rebooting...")
                     case _: # custom var
                         if cmds[1].startswith("_") :
                             vname = cmds[1][1:]
@@ -3709,6 +3719,7 @@ def command_help():
     ver                    : firmware version                       v
     reboot                 : reboots node
     ota <firmware.bin>     : upload firmware over-the-air (beebo)
+    set wifi <ssid> <pwd>  : provision WiFi credentials (beebo ALL build, then reboots)
     sleep <secs>           : sleeps for a given amount of secs      s
     wait_key               : wait until user presses <Enter>        wk
     apply_to <f> <cmds>    : sends cmds to contacts matching f      at
