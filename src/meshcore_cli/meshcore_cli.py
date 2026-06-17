@@ -2261,7 +2261,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         if res.type == EventType.ERROR:
                             print(f"Error: {res}")
                         else:
-                            print(f"WiFi credentials saved ({ssid}). Board is rebooting...")
+                            print(f"WiFi credentials saved ({ssid}).")
                     case _: # custom var
                         if cmds[1].startswith("_") :
                             vname = cmds[1][1:]
@@ -3719,7 +3719,7 @@ def command_help():
     ver                    : firmware version                       v
     reboot                 : reboots node
     ota <firmware.bin>     : upload firmware over-the-air (beebo)
-    set wifi <ssid> <pwd>  : provision WiFi credentials (beebo ALL build, then reboots)
+    set wifi <ssid> <pwd>  : provision WiFi credentials (beebo)
     sleep <secs>           : sleeps for a given amount of secs      s
     wait_key               : wait until user presses <Enter>        wk
     apply_to <f> <cmds>    : sends cmds to contacts matching f      at
