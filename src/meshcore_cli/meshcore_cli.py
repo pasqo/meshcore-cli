@@ -2646,23 +2646,30 @@ async def next_cmd(mc, cmds, json_output=False):
             case "ota":
                 argnum = 2
                 fw_file = cmds[1]
+                fw_data = None
                 try:
                     with open(fw_file, "rb") as f:
                         fw_data = f.read()
                 except OSError as e:
                     print(f"Error reading firmware file: {e}")
-                    break
-                total = len(fw_data)
-                print(f"OTA upload: {fw_file} ({total} bytes)")
-                def ota_progress(chunk_num, total_chunks):
-                    pct = int(chunk_num * 100 / total_chunks)
-                    print(f"\r  Progress: {pct}% ({chunk_num}/{total_chunks})", end="", flush=True)
-                res = await mc.commands.ota_upload(fw_data, progress_cb=ota_progress)
-                print()
-                if res.type == EventType.ERROR:
-                    print(f"OTA failed: {res.payload}")
-                else:
-                    print("OTA complete. Board is rebooting.")
+                if fw_data is not None:
+                    # Query current firmware version before starting
+                    info_evt = await mc.commands.send_device_query()
+                    old_ver = info_evt.payload.get("ver", "unknown") if not info_evt.type == EventType.ERROR else "unknown"
+                    new_ver = os.path.splitext(os.path.basename(fw_file))[0]
+                    total = len(fw_data)
+                    print(f"OTA upload: {fw_file} ({total} bytes)")
+                    print(f"  Current firmware : {old_ver}")
+                    print(f"  New firmware     : {new_ver}")
+                    def ota_progress(chunk_num, total_chunks):
+                        pct = int(chunk_num * 100 / total_chunks)
+                        print(f"\r  Progress: {pct}% ({chunk_num}/{total_chunks})", end="", flush=True)
+                    res = await mc.commands.ota_upload(fw_data, progress_cb=ota_progress)
+                    print()
+                    if res.type == EventType.ERROR:
+                        print(f"OTA failed: {res.payload}")
+                    else:
+                        print(f"OTA complete. Board is rebooting into {new_ver}.")
 
             case "msg" | "m" | "{" : # sends to a contact from name
                 argnum = 2
@@ -3701,6 +3708,7 @@ def command_help():
     card                   : export this node URI                   e
     ver                    : firmware version                       v
     reboot                 : reboots node
+    ota <firmware.bin>     : upload firmware over-the-air (beebo)
     sleep <secs>           : sleeps for a given amount of secs      s
     wait_key               : wait until user presses <Enter>        wk
     apply_to <f> <cmds>    : sends cmds to contacts matching f      at
