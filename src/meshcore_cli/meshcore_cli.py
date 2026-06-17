@@ -511,6 +511,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
         "time" : None,
         "clock" : {"sync" : None},
         "reboot" : None,
+        "ota" : None,
         "card" : None,
         "upload_card" : None,
         "contacts": None,
@@ -2641,6 +2642,27 @@ async def next_cmd(mc, cmds, json_output=False):
                 logger.debug(res)
                 if json_output :
                     print(json.dumps(res.payload, indent=4))
+
+            case "ota":
+                argnum = 2
+                fw_file = cmds[1]
+                try:
+                    with open(fw_file, "rb") as f:
+                        fw_data = f.read()
+                except OSError as e:
+                    print(f"Error reading firmware file: {e}")
+                    break
+                total = len(fw_data)
+                print(f"OTA upload: {fw_file} ({total} bytes)")
+                def ota_progress(chunk_num, total_chunks):
+                    pct = int(chunk_num * 100 / total_chunks)
+                    print(f"\r  Progress: {pct}% ({chunk_num}/{total_chunks})", end="", flush=True)
+                res = await mc.commands.ota_upload(fw_data, progress_cb=ota_progress)
+                print()
+                if res.type == EventType.ERROR:
+                    print(f"OTA failed: {res.payload}")
+                else:
+                    print("OTA complete. Board is rebooting.")
 
             case "msg" | "m" | "{" : # sends to a contact from name
                 argnum = 2
