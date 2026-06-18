@@ -4662,11 +4662,15 @@ async def main(argv):
 
     mc = None
     if not hostname is None : # connect via tcp
-        try:
-            mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
-        except OSError:
-            await asyncio.sleep(1.0)
-            mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
+        delays = [1.0, 2.0, 3.0]   # retry up to 3 times with increasing delays
+        for attempt, delay in enumerate(delays, 1):
+            try:
+                mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
+                break
+            except OSError:
+                if attempt == len(delays):
+                    raise
+                await asyncio.sleep(delay)
     elif not serial_port is None : # connect via serial port
         mc = await MeshCore.create_serial(port=serial_port, baudrate=baudrate, debug=debug, only_error=json_output)
         if mc is None: # did not connect
