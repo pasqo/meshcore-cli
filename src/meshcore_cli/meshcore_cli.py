@@ -605,6 +605,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "txpower":None,
             "radio.tx":None,
             "radio.txpower":None,
+            "radio.stats":None,
             "rxgain":None,
             "radio.rxgain":None,
             "fem.rxgain":None,
@@ -2576,7 +2577,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             logger.error("Couldn't get stats")
                         else:
                             print(json.dumps(res.payload, indent=4))
-                    case "stats_radio":
+                    case "stats_radio" | "radio.stats":
                         res = await mc.commands.get_stats_radio()
                         logger.debug(res)
                         if res.type == EventType.ERROR:
