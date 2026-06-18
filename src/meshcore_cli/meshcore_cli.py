@@ -560,7 +560,9 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "tx" : None,
             "txpower" : None,
             "rxgain" : {"on":None, "off":None},
+            "radio.rxgain" : {"on":None, "off":None},
             "fem.rxgain" : {"on":None, "off":None},
+            "radio.fem.rxgain" : {"on":None, "off":None},
             "tuning" : {",", "af,tx_d"},
             "lat" : None,
             "lon" : None,
@@ -600,7 +602,9 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "tx":None,
             "txpower":None,
             "rxgain":None,
+            "radio.rxgain":None,
             "fem.rxgain":None,
+            "radio.fem.rxgain":None,
             "coords":None,
             "lat":None,
             "lon":None,
@@ -2117,7 +2121,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(res.payload, indent=4))
                         else:
                             print("ok")
-                    case "fem.rxgain":
+                    case "fem.rxgain" | "radio.fem.rxgain":
                         val = 1 if cmds[2] == "on" else 0
                         res = await mc.commands.send(b"\x2d" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
                         if res.type == EventType.ERROR:
@@ -2126,7 +2130,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps({"fem_rxgain": "on" if val else "off"}))
                         else:
                             print("ok")
-                    case "rxgain":
+                    case "rxgain" | "radio.rxgain":
                         val = 1 if cmds[2] == "on" else 0
                         res = await mc.commands.send(b"\x2f" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
                         if res.type == EventType.ERROR:
@@ -2394,7 +2398,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(mc.self_info["tx_power"]))
                         else:
                             print(mc.self_info["tx_power"])
-                    case "fem.rxgain":
+                    case "fem.rxgain" | "radio.fem.rxgain":
                         res = await mc.commands.send(b"\x2c", [EventType.OK, EventType.ERROR])
                         if res.type == EventType.ERROR:
                             print("Error: unsupported by this board")
@@ -2404,7 +2408,7 @@ async def next_cmd(mc, cmds, json_output=False):
                                 print(json.dumps({"fem_rxgain": "on" if val else "off"}))
                             else:
                                 print("on" if val else "off")
-                    case "rxgain":
+                    case "rxgain" | "radio.rxgain":
                         res = await mc.commands.send(b"\x2e", [EventType.OK, EventType.ERROR])
                         if res.type == EventType.ERROR:
                             print(f"Error: {res}")
@@ -3940,8 +3944,8 @@ def get_help_for (cmdname, context="line") :
     lon                : longitude
     radio              : radio parameters
     tx                 : tx power
-    rxgain             : SX1262 RX boosted gain on/off
-    fem.rxgain         : KCT8103L FEM LNA state (V4.3 only)
+    rxgain             : SX1262 RX boosted gain on/off (alias: radio.rxgain)
+    fem.rxgain         : KCT8103L FEM LNA state, V4.3 only (alias: radio.fem.rxgain)
     private_key        : private key of the node
     print_snr          : snr display in messages
     print_adverts      : display adverts as they come
@@ -3964,8 +3968,8 @@ def get_help_for (cmdname, context="line") :
     radio <freq,bw,sf,cr>       : radio params
     tuning <rx_dly,af>          : tuning params
     tx <dbm>                    : tx power
-    rxgain <on/off>             : SX1262 RX boosted gain
-    fem.rxgain <on/off>         : KCT8103L FEM LNA (V4.3 only)
+    rxgain <on/off>             : SX1262 RX boosted gain (alias: radio.rxgain)
+    fem.rxgain <on/off>         : KCT8103L FEM LNA, V4.3 only (alias: radio.fem.rxgain)
     name <name>                 : node name
     lat <lat>                   : latitude
     lon <lon>                   : longitude
