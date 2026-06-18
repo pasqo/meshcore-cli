@@ -2127,7 +2127,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         if res.type == EventType.ERROR:
                             print("Error: unsupported by this board")
                         elif json_output:
-                            print(json.dumps({"fem_rxgain": "on" if val else "off"}))
+                            print(json.dumps({cmds[1]: "on" if val else "off"}))
                         else:
                             print("ok")
                     case "rxgain" | "radio.rxgain":
@@ -2136,7 +2136,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         if res.type == EventType.ERROR:
                             print(f"Error: {res}")
                         elif json_output:
-                            print(json.dumps({"rxgain": "on" if val else "off"}))
+                            print(json.dumps({cmds[1]: "on" if val else "off"}))
                         else:
                             print("ok")
                     case "lat":
@@ -2405,7 +2405,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         else:
                             val = res.payload.get("value", 0)
                             if json_output:
-                                print(json.dumps({"fem_rxgain": "on" if val else "off"}))
+                                print(json.dumps({cmds[1]: "on" if val else "off"}))
                             else:
                                 print("on" if val else "off")
                     case "rxgain" | "radio.rxgain":
@@ -2415,7 +2415,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         else:
                             val = res.payload.get("value", 0)
                             if json_output:
-                                print(json.dumps({"rxgain": "on" if val else "off"}))
+                                print(json.dumps({cmds[1]: "on" if val else "off"}))
                             else:
                                 print("on" if val else "off")
                     case "coords":
