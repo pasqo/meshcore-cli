@@ -559,6 +559,8 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : {",,,":None, "f,bw,sf,cr":None},
             "tx" : None,
             "txpower" : None,
+            "radio.tx" : None,
+            "radio.txpower" : None,
             "rxgain" : {"on":None, "off":None},
             "radio.rxgain" : {"on":None, "off":None},
             "fem.rxgain" : {"on":None, "off":None},
@@ -601,6 +603,8 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio":None,
             "tx":None,
             "txpower":None,
+            "radio.tx":None,
+            "radio.txpower":None,
             "rxgain":None,
             "radio.rxgain":None,
             "fem.rxgain":None,
@@ -2112,7 +2116,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(res.payload, indent=4))
                         else:
                             print("ok")
-                    case "tx" | "txpower":
+                    case "tx" | "txpower" | "radio.tx" | "radio.txpower":
                         res = await mc.commands.set_tx_power(cmds[2])
                         logger.debug(res)
                         if res.type == EventType.ERROR:
@@ -2392,10 +2396,10 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(mc.self_info["name"]))
                         else:
                             print(mc.self_info["name"])
-                    case "tx" | "txpower":
+                    case "tx" | "txpower" | "radio.tx" | "radio.txpower":
                         await mc.commands.send_appstart()
                         if json_output :
-                            print(json.dumps(mc.self_info["tx_power"]))
+                            print(json.dumps({cmds[1]: mc.self_info["tx_power"]}))
                         else:
                             print(mc.self_info["tx_power"])
                     case "fem.rxgain" | "radio.fem.rxgain":
