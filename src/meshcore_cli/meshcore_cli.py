@@ -837,18 +837,14 @@ Some cmds have an help accessible with ?<cmd>. Do ?[Tab] to get a list.
 
     contact = to
     prev_contact = None
+    _msg_subscribed = False
 
     scope = await set_scope(mc, "*")
     prev_scope = scope
 
     await get_contacts(mc, anim=True)
     await get_channels(mc, anim=True)
-
-    # Call sync_msg before going further so there is no issue when scrolling
-    # long list of msgs
     await next_cmd(mc, ["sync_msgs"])
-
-    await subscribe_to_msgs(mc, above=True)
 
     try:
         if os.path.isdir(MCCLI_CONFIG_DIR) :
@@ -878,6 +874,12 @@ Some cmds have an help accessible with ?<cmd>. Do ?[Tab] to get a list.
         last_ack = True
         while True:
             # reset scope (if changed)
+            # Subscribe to messages the first time a contact/channel is selected
+            if contact is not None and not _msg_subscribed:
+                await subscribe_to_msgs(mc, above=True)
+                _msg_subscribed = True
+                await next_cmd(mc, ["sync_msgs"])
+
             scope = await set_scope(mc, scope)
 
             color = process_event_message.color
@@ -2671,15 +2673,41 @@ async def next_cmd(mc, cmds, json_output=False):
                     print(f"OTA upload: {fw_file} ({total} bytes)")
                     print(f"  Current firmware : {old_ver}")
                     print(f"  New firmware     : {new_ver}")
-                    def ota_progress(chunk_num, total_chunks):
-                        pct = int(chunk_num * 100 / total_chunks)
-                        print(f"\r  Progress: {pct}% ({chunk_num}/{total_chunks})", end="", flush=True)
-                    res = await mc.commands.ota_upload(fw_data, progress_cb=ota_progress)
-                    print()
-                    if res.type == EventType.ERROR:
-                        print(f"OTA failed: {res.payload}")
+                    # OTA upload loop — owned here rather than delegated to the library
+                    # so all beebo-specific behavior (retry, short end-timeout) is tracked.
+                    begin_evt = await mc.commands.ota_begin()
+                    if begin_evt.type == EventType.ERROR:
+                        print(f"OTA failed to start: {begin_evt.payload}")
                     else:
-                        print(f"OTA complete. Board is rebooting into {new_ver}.")
+                        chunk_size = begin_evt.payload.get("chunk_size", 128)
+                        total_chunks = (total + chunk_size - 1) // chunk_size
+                        failed = False
+                        for idx in range(0, total, chunk_size):
+                            chunk = fw_data[idx : idx + chunk_size]
+                            chunk_num = (idx // chunk_size) + 1
+                            evt = await mc.commands.ota_write(chunk)
+                            if evt.type == EventType.ERROR:
+                                if evt.payload.get("reason") == "no_event_received":
+                                    await asyncio.sleep(1.0)
+                                    evt = await mc.commands.ota_write(chunk)
+                                if evt.type == EventType.ERROR:
+                                    print(f"\nOTA failed at chunk {chunk_num}/{total_chunks}: {evt.payload}")
+                                    failed = True
+                                    break
+                            pct = int(chunk_num * 100 / total_chunks)
+                            print(f"\r  Progress: {pct}% ({chunk_num}/{total_chunks})", end="", flush=True)
+                        if not failed:
+                            print("\n  Finalizing...", flush=True)
+                            # Device reboots immediately after CMD_OTA_END; connection drops
+                            # before OK arrives. Give it 5 s then treat loss as success.
+                            try:
+                                end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=5.0)
+                                if end_evt.type == EventType.ERROR:
+                                    print(f"OTA failed: {end_evt.payload}")
+                                else:
+                                    print(f"OTA complete. Board is rebooting into {new_ver}.")
+                            except asyncio.TimeoutError:
+                                print(f"OTA complete. Board is rebooting into {new_ver}.")
 
             case "msg" | "m" | "{" : # sends to a contact from name
                 argnum = 2
@@ -4634,7 +4662,11 @@ async def main(argv):
 
     mc = None
     if not hostname is None : # connect via tcp
-        mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
+        try:
+            mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
+        except OSError:
+            await asyncio.sleep(1.0)
+            mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
     elif not serial_port is None : # connect via serial port
         mc = await MeshCore.create_serial(port=serial_port, baudrate=baudrate, debug=debug, only_error=json_output)
         if mc is None: # did not connect
@@ -4743,6 +4775,8 @@ async def main(argv):
     if res.type == EventType.ERROR :
         logger.error(f"Error while querying device: {res}")
         return
+
+    await mc.commands.set_time(int(time.time()))
 
     if os.path.isdir(MCCLI_CONFIG_DIR) :
         log_message.file = MCCLI_CONFIG_DIR + (mc.self_info["name"].replace("/","")) + ".msgs"
