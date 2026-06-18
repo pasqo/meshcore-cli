@@ -559,6 +559,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : {",,,":None, "f,bw,sf,cr":None},
             "tx" : None,
             "txpower" : None,
+            "rxgain" : {"on":None, "off":None},
             "fem.rxgain" : {"on":None, "off":None},
             "tuning" : {",", "af,tx_d"},
             "lat" : None,
@@ -598,6 +599,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio":None,
             "tx":None,
             "txpower":None,
+            "rxgain":None,
             "fem.rxgain":None,
             "coords":None,
             "lat":None,
@@ -2124,6 +2126,15 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps({"fem_rxgain": "on" if val else "off"}))
                         else:
                             print("ok")
+                    case "rxgain":
+                        val = 1 if cmds[2] == "on" else 0
+                        res = await mc.commands.send(b"\x2f" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
+                        if res.type == EventType.ERROR:
+                            print(f"Error: {res}")
+                        elif json_output:
+                            print(json.dumps({"rxgain": "on" if val else "off"}))
+                        else:
+                            print("ok")
                     case "lat":
                         if "adv_lon" in mc.self_info :
                             lon = mc.self_info['adv_lon']
@@ -2391,6 +2402,16 @@ async def next_cmd(mc, cmds, json_output=False):
                             val = res.payload.get("value", 0)
                             if json_output:
                                 print(json.dumps({"fem_rxgain": "on" if val else "off"}))
+                            else:
+                                print("on" if val else "off")
+                    case "rxgain":
+                        res = await mc.commands.send(b"\x2e", [EventType.OK, EventType.ERROR])
+                        if res.type == EventType.ERROR:
+                            print(f"Error: {res}")
+                        else:
+                            val = res.payload.get("value", 0)
+                            if json_output:
+                                print(json.dumps({"rxgain": "on" if val else "off"}))
                             else:
                                 print("on" if val else "off")
                     case "coords":
@@ -3919,6 +3940,7 @@ def get_help_for (cmdname, context="line") :
     lon                : longitude
     radio              : radio parameters
     tx                 : tx power
+    rxgain             : SX1262 RX boosted gain on/off
     fem.rxgain         : KCT8103L FEM LNA state (V4.3 only)
     private_key        : private key of the node
     print_snr          : snr display in messages
@@ -3942,6 +3964,7 @@ def get_help_for (cmdname, context="line") :
     radio <freq,bw,sf,cr>       : radio params
     tuning <rx_dly,af>          : tuning params
     tx <dbm>                    : tx power
+    rxgain <on/off>             : SX1262 RX boosted gain
     fem.rxgain <on/off>         : KCT8103L FEM LNA (V4.3 only)
     name <name>                 : node name
     lat <lat>                   : latitude
