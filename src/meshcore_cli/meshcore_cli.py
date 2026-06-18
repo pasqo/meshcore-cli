@@ -558,6 +558,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "pin" : None,
             "radio" : {",,,":None, "f,bw,sf,cr":None},
             "tx" : None,
+            "fem.rxgain" : {"on":None, "off":None},
             "tuning" : {",", "af,tx_d"},
             "lat" : None,
             "lon" : None,
@@ -595,6 +596,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "fstats": None,
             "radio":None,
             "tx":None,
+            "fem.rxgain":None,
             "coords":None,
             "lat":None,
             "lon":None,
@@ -716,6 +718,8 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : None,
             "freq":None,
             "tx":None,
+            "radio.fem.rxgain":None,
+            "radio.rxgain":None,
             "af" : None,
             "repeat" : None,
             "allow.read.only" : None,
@@ -745,6 +749,8 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : {",,,":None, "f,bw,sf,cr": None},
             "freq" : None,
             "tx" : None,
+            "radio.fem.rxgain" : {"on":None, "off":None},
+            "radio.rxgain" : {"on":None, "off":None},
             "af": None,
             "repeat" : {"on": None, "off": None},
             "flood.advert.interval" : None,
@@ -2105,6 +2111,15 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(res.payload, indent=4))
                         else:
                             print("ok")
+                    case "fem.rxgain":
+                        val = 1 if cmds[2] == "on" else 0
+                        res = await mc.commands.send(b"\x2d" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
+                        if res.type == EventType.ERROR:
+                            print("Error: unsupported by this board")
+                        elif json_output:
+                            print(json.dumps({"fem_rxgain": "on" if val else "off"}))
+                        else:
+                            print("ok")
                     case "lat":
                         if "adv_lon" in mc.self_info :
                             lon = mc.self_info['adv_lon']
@@ -2364,6 +2379,16 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(mc.self_info["tx_power"]))
                         else:
                             print(mc.self_info["tx_power"])
+                    case "fem.rxgain":
+                        res = await mc.commands.send(b"\x2c", [EventType.OK, EventType.ERROR])
+                        if res.type == EventType.ERROR:
+                            print("Error: unsupported by this board")
+                        else:
+                            val = res.payload.get("value", 0)
+                            if json_output:
+                                print(json.dumps({"fem_rxgain": "on" if val else "off"}))
+                            else:
+                                print("on" if val else "off")
                     case "coords":
                         await mc.commands.send_appstart()
                         if json_output :
@@ -3890,6 +3915,7 @@ def get_help_for (cmdname, context="line") :
     lon                : longitude
     radio              : radio parameters
     tx                 : tx power
+    fem.rxgain         : KCT8103L FEM LNA state (V4.3 only)
     private_key        : private key of the node
     print_snr          : snr display in messages
     print_adverts      : display adverts as they come
@@ -3912,6 +3938,7 @@ def get_help_for (cmdname, context="line") :
     radio <freq,bw,sf,cr>       : radio params
     tuning <rx_dly,af>          : tuning params
     tx <dbm>                    : tx power
+    fem.rxgain <on/off>         : KCT8103L FEM LNA (V4.3 only)
     name <name>                 : node name
     lat <lat>                   : latitude
     lon <lon>                   : longitude
