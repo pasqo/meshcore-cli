@@ -2122,7 +2122,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         if res.type == EventType.ERROR:
                             print(f"Error: {res}")
                         elif json_output :
-                            print(json.dumps(res.payload, indent=4))
+                            print(json.dumps({cmds[1]: int(cmds[2])}))
                         else:
                             print("ok")
                     case "fem.rxgain" | "radio.fem.rxgain":
