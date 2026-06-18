@@ -4881,10 +4881,13 @@ async def main(argv):
     else:
         logger.debug(f"No device init script for {mc.self_info['name']}")
 
-    if len(args) == 0 : # no args, run in chat mode
-        await process_cmds(mc, ["chat"], json_output)
-    else:
-        await process_cmds(mc, args, json_output)
+    try:
+        if len(args) == 0 : # no args, run in chat mode
+            await process_cmds(mc, ["chat"], json_output)
+        else:
+            await process_cmds(mc, args, json_output)
+    finally:
+        await mc.disconnect()
 
 def cli():
     try:
