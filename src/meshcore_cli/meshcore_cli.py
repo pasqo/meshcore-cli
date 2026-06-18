@@ -2665,16 +2665,14 @@ async def next_cmd(mc, cmds, json_output=False):
                 except OSError as e:
                     print(f"Error reading firmware file: {e}")
                 if fw_data is not None:
-                    # Query current firmware version before starting
+                    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
                     info_evt = await mc.commands.send_device_query()
                     old_ver = info_evt.payload.get("ver", "unknown") if not info_evt.type == EventType.ERROR else "unknown"
-                    new_ver = os.path.splitext(os.path.basename(fw_file))[0]
+                    basename = os.path.splitext(os.path.basename(fw_file))[0]
+                    new_ver = basename.split("-", 2)[-1] if basename.count("-") >= 2 else basename
                     total = len(fw_data)
                     print(f"OTA upload: {fw_file} ({total} bytes)")
-                    print(f"  Current firmware : {old_ver}")
-                    print(f"  New firmware     : {new_ver}")
-                    # OTA upload loop — owned here rather than delegated to the library
-                    # so all beebo-specific behavior (retry, short end-timeout) is tracked.
+                    print(f"  {old_ver}  →  {new_ver}")
                     begin_evt = await mc.commands.ota_begin()
                     if begin_evt.type == EventType.ERROR:
                         print(f"OTA failed to start: {begin_evt.payload}")
@@ -2682,32 +2680,38 @@ async def next_cmd(mc, cmds, json_output=False):
                         chunk_size = begin_evt.payload.get("chunk_size", 128)
                         total_chunks = (total + chunk_size - 1) // chunk_size
                         failed = False
-                        for idx in range(0, total, chunk_size):
-                            chunk = fw_data[idx : idx + chunk_size]
-                            chunk_num = (idx // chunk_size) + 1
-                            evt = await mc.commands.ota_write(chunk)
-                            if evt.type == EventType.ERROR:
-                                if evt.payload.get("reason") == "no_event_received":
-                                    await asyncio.sleep(1.0)
-                                    evt = await mc.commands.ota_write(chunk)
+                        with Progress(
+                            TextColumn("[bold blue]{task.description}"),
+                            BarColumn(),
+                            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                            TransferSpeedColumn(),
+                            TimeRemainingColumn(),
+                        ) as progress:
+                            task = progress.add_task("Uploading", total=total)
+                            for idx in range(0, total, chunk_size):
+                                chunk = fw_data[idx : idx + chunk_size]
+                                chunk_num = (idx // chunk_size) + 1
+                                evt = await mc.commands.ota_write(chunk)
                                 if evt.type == EventType.ERROR:
-                                    print(f"\nOTA failed at chunk {chunk_num}/{total_chunks}: {evt.payload}")
-                                    failed = True
-                                    break
-                            pct = int(chunk_num * 100 / total_chunks)
-                            print(f"\r  Progress: {pct}% ({chunk_num}/{total_chunks})", end="", flush=True)
+                                    if evt.payload.get("reason") == "no_event_received":
+                                        await asyncio.sleep(1.0)
+                                        evt = await mc.commands.ota_write(chunk)
+                                    if evt.type == EventType.ERROR:
+                                        progress.stop()
+                                        print(f"OTA failed at chunk {chunk_num}/{total_chunks}: {evt.payload}")
+                                        failed = True
+                                        break
+                                progress.update(task, advance=len(chunk))
                         if not failed:
-                            print("\n  Finalizing...", flush=True)
-                            # Device reboots immediately after CMD_OTA_END; connection drops
-                            # before OK arrives. Give it 5 s then treat loss as success.
+                            print("  Finalizing...", flush=True)
                             try:
                                 end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=5.0)
                                 if end_evt.type == EventType.ERROR:
                                     print(f"OTA failed: {end_evt.payload}")
                                 else:
-                                    print(f"OTA complete. Board is rebooting into {new_ver}.")
+                                    print(f"OTA complete — rebooting into {new_ver}.")
                             except asyncio.TimeoutError:
-                                print(f"OTA complete. Board is rebooting into {new_ver}.")
+                                print(f"OTA complete — rebooting into {new_ver}.")
 
             case "msg" | "m" | "{" : # sends to a contact from name
                 argnum = 2
@@ -4667,14 +4671,18 @@ async def main(argv):
             try:
                 mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
                 break
-            except OSError:
+            except OSError as e:
                 if attempt == len(delays):
-                    raise
+                    print(f"Could not connect to {hostname}:{port} — {e}")
+                    print("The node may already have an active companion session (phone app, another CLI).")
+                    print("Disconnect the other client and try again.")
+                    return
                 await asyncio.sleep(delay)
     elif not serial_port is None : # connect via serial port
         mc = await MeshCore.create_serial(port=serial_port, baudrate=baudrate, debug=debug, only_error=json_output)
         if mc is None: # did not connect
-            logger.error("To connect to a repeater, use -r option.")
+            print(f"Could not connect via serial port {serial_port}.")
+            print("The node may already have an active companion session, or use -r for repeaters.")
     elif BLEAK_AVAILABLE : # connect via ble
         client = None
         if device or address and len(address.split(":")) == 6 :
@@ -4710,7 +4718,9 @@ async def main(argv):
                     break
 
             if not found :
-                logger.info(f"Couldn't find device {address}")
+                print(f"Could not find BLE device{' matching ' + address if address else ''}.")
+                print("If using multi-transport firmware, the node may have an active session on another transport.")
+                print("Disconnect the other client and try again.")
                 return
 
         try :
@@ -4742,12 +4752,16 @@ async def main(argv):
                         found = True
                         break
                 if not found :
-                    logger.info(f"Couldn't find device {address}")
+                    print(f"Could not find BLE device{' matching ' + address if address else ''}.")
+                    print("If using multi-transport firmware, the node may have an active session on another transport.")
+                    print("Disconnect the other client and try again.")
                     return
             try :
                 mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=json_output, pin=pin)
             except ConnectionError :
-                logger.error("Can't connect to node, exiting")
+                print("Could not connect to BLE device.")
+                print("The node may already have an active companion session.")
+                print("Disconnect the other client and try again.")
                 return
 
 
