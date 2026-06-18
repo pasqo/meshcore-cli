@@ -4727,7 +4727,7 @@ async def main(argv):
         delays = [1.0, 2.0, 3.0]   # retry up to 3 times with increasing delays
         for attempt, delay in enumerate(delays, 1):
             try:
-                mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
+                mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=(json_output or quiet))
                 break
             except OSError as e:
                 if attempt == len(delays):
@@ -4737,7 +4737,7 @@ async def main(argv):
                     return
                 await asyncio.sleep(delay)
     elif not serial_port is None : # connect via serial port
-        mc = await MeshCore.create_serial(port=serial_port, baudrate=baudrate, debug=debug, only_error=json_output)
+        mc = await MeshCore.create_serial(port=serial_port, baudrate=baudrate, debug=debug, only_error=(json_output or quiet))
         if mc is None: # did not connect
             print(f"Could not connect via serial port {serial_port}.")
             print("The node may already have an active companion session, or use -r for repeaters.")
@@ -4782,7 +4782,7 @@ async def main(argv):
                 return
 
         try :
-            mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=json_output, pin=pin)
+            mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=(json_output or quiet), pin=pin)
         except (BleakError, BleakDBusError):
             print("BLE connection asked (default behaviour), but no BLE HW found")
             print("Call meshcore-cli with -h for some more help (on commands)")
@@ -4815,7 +4815,7 @@ async def main(argv):
                     print("Disconnect the other client and try again.")
                     return
             try :
-                mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=json_output, pin=pin)
+                mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=(json_output or quiet), pin=pin)
             except ConnectionError :
                 print("Could not connect to BLE device.")
                 print("The node may already have an active companion session.")
