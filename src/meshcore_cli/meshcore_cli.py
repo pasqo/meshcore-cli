@@ -558,6 +558,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "pin" : None,
             "radio" : {",,,":None, "f,bw,sf,cr":None},
             "tx" : None,
+            "txpower" : None,
             "fem.rxgain" : {"on":None, "off":None},
             "tuning" : {",", "af,tx_d"},
             "lat" : None,
@@ -596,6 +597,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "fstats": None,
             "radio":None,
             "tx":None,
+            "txpower":None,
             "fem.rxgain":None,
             "coords":None,
             "lat":None,
@@ -718,6 +720,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : None,
             "freq":None,
             "tx":None,
+            "txpower":None,
             "radio.fem.rxgain":None,
             "radio.rxgain":None,
             "af" : None,
@@ -749,6 +752,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : {",,,":None, "f,bw,sf,cr": None},
             "freq" : None,
             "tx" : None,
+            "txpower" : None,
             "radio.fem.rxgain" : {"on":None, "off":None},
             "radio.rxgain" : {"on":None, "off":None},
             "af": None,
@@ -2102,7 +2106,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(res.payload, indent=4))
                         else:
                             print("ok")
-                    case "tx":
+                    case "tx" | "txpower":
                         res = await mc.commands.set_tx_power(cmds[2])
                         logger.debug(res)
                         if res.type == EventType.ERROR:
@@ -2373,7 +2377,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(mc.self_info["name"]))
                         else:
                             print(mc.self_info["name"])
-                    case "tx":
+                    case "tx" | "txpower":
                         await mc.commands.send_appstart()
                         if json_output :
                             print(json.dumps(mc.self_info["tx_power"]))
@@ -4146,7 +4150,7 @@ REPEATER_COMMANDS = {
     "clear": {"stats": None},
     "log": {"start": None, "stop": None, "erase": None},
     "get": {
-        "name": None, "radio": None, "tx": None, "freq": None,
+        "name": None, "radio": None, "tx": None, "txpower": None, "freq": None,
         "public.key": None, "prv.key": None, "repeat": None, "role": None,
         "lat": None, "lon": None, "af": None,
         "rxdelay": None, "txdelay": None, "direct.txdelay": None,
@@ -4161,7 +4165,7 @@ REPEATER_COMMANDS = {
         "owner.info": None,
     },
     "set": {
-        "name": None, "radio": None, "tx": None, "freq": None,
+        "name": None, "radio": None, "tx": None, "txpower": None, "freq": None,
         "prv.key": None, "repeat": {"on": None, "off": None},
         "lat": None, "lon": None, "af": None,
         "rxdelay": None, "txdelay": None, "direct.txdelay": None,
@@ -4215,14 +4219,14 @@ REPEATER_HELP = f"""
 {ANSI_BGREEN}Configuration (get/set):{ANSI_END}
   get name            - Node name
   get radio           - Radio params (freq,bw,sf,cr)
-  get tx              - TX power (dBm)
+  get tx|txpower      - TX power (dBm)
   get repeat          - Repeat mode on/off
   get public.key      - Node public key
   get advert.interval - Advertisement interval (minutes)
   get owner.info      - Owner information
 
   set name <name>     - Set node name
-  set tx <power>      - Set TX power (dBm)
+  set tx|txpower <p>  - Set TX power (dBm)
   set repeat on|off   - Enable/disable repeating
   set radio f,bw,sf,cr - Set radio params (reboot to apply)
   set advert.interval <min> - Set advert interval (60-240 min)
