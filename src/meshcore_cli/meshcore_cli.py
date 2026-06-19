@@ -2723,16 +2723,17 @@ async def next_cmd(mc, cmds, json_output=False):
                         buf_pct = int(cmds[2])
                         if buf_pct < 0 or buf_pct > 100:
                             print("Buffer % must be 0-100")
-                            break
+                            buf_pct = -1
                     except ValueError:
                         print(f"Invalid buffer %: {cmds[2]}")
-                        break
+                        buf_pct = -1
                 fw_data = None
-                try:
-                    with open(fw_file, "rb") as f:
-                        fw_data = f.read()
-                except OSError as e:
-                    print(f"Error reading firmware file: {e}")
+                if buf_pct >= 0:
+                    try:
+                        with open(fw_file, "rb") as f:
+                            fw_data = f.read()
+                    except OSError as e:
+                        print(f"Error reading firmware file: {e}")
                 if fw_data is not None:
                     from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
                     info_evt = await mc.commands.send_device_query()
