@@ -2756,8 +2756,17 @@ async def next_cmd(mc, cmds, json_output=False):
                         print(f"OTA failed to start: {begin_evt.payload}")
                     else:
                         chunk_size = begin_evt.payload.get("chunk_size", 128)
+                        buf_cap = begin_evt.payload.get("buf_cap", 0) or (total * buf_pct // 100 if buf_pct > 0 else 0)
                         total_chunks = (total + chunk_size - 1) // chunk_size
+                        if buf_cap > 0:
+                            n_bufs = (total + buf_cap - 1) // buf_cap
+                            print(f"  Chunk size: {chunk_size} bytes, buffer: {buf_cap // 1024} kB × {n_bufs}")
+                        else:
+                            print(f"  Chunk size: {chunk_size} bytes, direct to flash")
                         failed = False
+                        bytes_in_buf = 0
+                        buf_chunk_num = 0
+                        n_buf_chunks = ((total + buf_cap - 1) // buf_cap) if buf_cap > 0 else 0
                         with Progress(
                             TextColumn("[bold blue]{task.description}"),
                             BarColumn(),
@@ -2765,10 +2774,13 @@ async def next_cmd(mc, cmds, json_output=False):
                             TransferSpeedColumn(),
                             TimeRemainingColumn(),
                         ) as progress:
-                            task = progress.add_task("Uploading", total=total)
+                            task = progress.add_task("Sending", total=total)
                             for idx in range(0, total, chunk_size):
                                 chunk = fw_data[idx : idx + chunk_size]
                                 chunk_num = (idx // chunk_size) + 1
+                                if buf_cap > 0 and bytes_in_buf + len(chunk) >= buf_cap:
+                                    buf_chunk_num += 1
+                                    progress.update(task, description=f"Writing to flash ({buf_chunk_num}/{n_buf_chunks})")
                                 evt = await mc.commands.ota_write(chunk)
                                 if evt.type == EventType.ERROR:
                                     if evt.payload.get("reason") == "no_event_received":
@@ -2780,8 +2792,13 @@ async def next_cmd(mc, cmds, json_output=False):
                                         failed = True
                                         break
                                 progress.update(task, advance=len(chunk))
+                                if buf_cap > 0:
+                                    bytes_in_buf += len(chunk)
+                                    if bytes_in_buf >= buf_cap:
+                                        bytes_in_buf -= buf_cap
+                                        progress.update(task, description="Sending")
                         if not failed:
-                            print("  Finalizing...", flush=True)
+                            print("  Writing to flash...", flush=True)
                             try:
                                 end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=30.0)
                                 if end_evt.type == EventType.ERROR and end_evt.payload.get("reason") != "no_event_received":
