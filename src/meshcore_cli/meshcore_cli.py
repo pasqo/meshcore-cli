@@ -4788,10 +4788,15 @@ async def main(argv):
 
         try :
             mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=(json_output or quiet), pin=pin)
-        except (BleakError, BleakDBusError):
-            print("BLE connection asked (default behaviour), but no BLE HW found")
-            print("Call meshcore-cli with -h for some more help (on commands)")
-            command_usage()
+        except (BleakError, BleakDBusError, OSError) as e:
+            if isinstance(e, OSError) and not isinstance(e, (BleakError, BleakDBusError)):
+                print(f"BLE connection failed: {e}")
+                print("The device may have rejected the connection (stale pairing, auth failure).")
+                print("Try removing the device from Windows Bluetooth settings and re-pairing.")
+            else:
+                print("BLE connection asked (default behaviour), but no BLE HW found")
+                print("Call meshcore-cli with -h for some more help (on commands)")
+                command_usage()
             return
         except ConnectionError :
             logger.info("Error while connecting, retrying once ...")
@@ -4821,10 +4826,15 @@ async def main(argv):
                     return
             try :
                 mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=(json_output or quiet), pin=pin)
-            except ConnectionError :
-                print("Could not connect to BLE device.")
-                print("The node may already have an active companion session.")
-                print("Disconnect the other client and try again.")
+            except (ConnectionError, OSError) as e:
+                if isinstance(e, OSError) and not isinstance(e, ConnectionError):
+                    print(f"BLE connection failed: {e}")
+                    print("The device may have rejected the connection (stale pairing, auth failure).")
+                    print("Try removing the device from Windows Bluetooth settings and re-pairing.")
+                else:
+                    print("Could not connect to BLE device.")
+                    print("The node may already have an active companion session.")
+                    print("Disconnect the other client and try again.")
                 return
 
 
@@ -4887,7 +4897,16 @@ async def main(argv):
         else:
             await process_cmds(mc, args, json_output)
     finally:
+        logger.debug("Disconnecting...")
+        try:
+            CMD_APP_DISCONNECT = 48
+            logger.debug("Sending disconnect command to device...")
+            await mc.connection_manager.connection.send(bytes([CMD_APP_DISCONNECT]))
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"Disconnect command failed: {e}")
         await mc.disconnect()
+        logger.debug("Disconnected.")
 
 def cli():
     try:
