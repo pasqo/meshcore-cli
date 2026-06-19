@@ -4918,13 +4918,15 @@ async def main(argv):
             await process_cmds(mc, args, json_output)
     finally:
         logger.debug("Disconnecting...")
-        try:
-            CMD_APP_DISCONNECT = 48
-            logger.debug("Sending disconnect command to device...")
-            await mc.connection_manager.connection.send(bytes([CMD_APP_DISCONNECT]))
-            await asyncio.sleep(0.3)
-        except Exception as e:
-            logger.debug(f"Disconnect command failed: {e}")
+        from meshcore.ble_cx import BLEConnection
+        if isinstance(mc.connection_manager.connection, BLEConnection):
+            try:
+                CMD_APP_DISCONNECT = 48
+                logger.debug("Sending BLE disconnect command to device...")
+                await mc.connection_manager.connection.send(bytes([CMD_APP_DISCONNECT]))
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.debug(f"Disconnect command failed: {e}")
         await mc.disconnect()
         logger.debug("Disconnected.")
 
