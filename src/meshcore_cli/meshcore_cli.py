@@ -2784,11 +2784,11 @@ async def next_cmd(mc, cmds, json_output=False):
                             print("  Finalizing...", flush=True)
                             try:
                                 end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=30.0)
-                                if end_evt.type == EventType.ERROR:
+                                if end_evt.type == EventType.ERROR and end_evt.payload.get("reason") != "no_event_received":
                                     print(f"OTA failed: {end_evt.payload}")
                                 else:
                                     print(f"OTA complete — rebooting into {new_ver}.")
-                            except asyncio.TimeoutError:
+                            except (asyncio.TimeoutError, OSError):
                                 print(f"OTA complete — rebooting into {new_ver}.")
 
             case "msg" | "m" | "{" : # sends to a contact from name
