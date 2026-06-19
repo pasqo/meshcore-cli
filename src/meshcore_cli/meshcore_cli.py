@@ -4919,7 +4919,7 @@ async def main(argv):
     finally:
         logger.debug("Disconnecting...")
         from meshcore.ble_cx import BLEConnection
-        if isinstance(mc.connection_manager.connection, BLEConnection):
+        if sys.platform == "win32" and isinstance(mc.connection_manager.connection, BLEConnection):
             try:
                 CMD_APP_DISCONNECT = 48
                 logger.debug("Sending BLE disconnect command to device...")
