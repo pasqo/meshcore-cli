@@ -2717,6 +2717,16 @@ async def next_cmd(mc, cmds, json_output=False):
             case "ota":
                 argnum = 2
                 fw_file = cmds[1]
+                buf_pct = 100
+                if len(cmds) >= 3:
+                    try:
+                        buf_pct = int(cmds[2])
+                        if buf_pct < 0 or buf_pct > 100:
+                            print("Buffer % must be 0-100")
+                            break
+                    except ValueError:
+                        print(f"Invalid buffer %: {cmds[2]}")
+                        break
                 fw_data = None
                 try:
                     with open(fw_file, "rb") as f:
@@ -2730,9 +2740,17 @@ async def next_cmd(mc, cmds, json_output=False):
                     basename = os.path.splitext(os.path.basename(fw_file))[0]
                     new_ver = basename.split("-", 2)[-1] if basename.count("-") >= 2 else basename
                     total = len(fw_data)
-                    print(f"OTA upload: {fw_file} ({total} bytes)")
+                    if buf_pct == 0:
+                        buf_desc = "streaming (no RAM buffer)"
+                    else:
+                        buf_kb = total * buf_pct // 100 // 1024
+                        buf_desc = f"{buf_pct}% buffered ({buf_kb} kB RAM)"
+                    print(f"OTA upload: {fw_file} ({total} bytes, {buf_desc})")
                     print(f"  {old_ver}  →  {new_ver}")
-                    begin_evt = await mc.commands.ota_begin()
+                    begin_evt = await mc.commands.send(
+                        b"\x80" + total.to_bytes(4, "little") + buf_pct.to_bytes(1, "little"),
+                        [EventType.OTA_BEGIN, EventType.ERROR],
+                    )
                     if begin_evt.type == EventType.ERROR:
                         print(f"OTA failed to start: {begin_evt.payload}")
                     else:
@@ -2764,7 +2782,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         if not failed:
                             print("  Finalizing...", flush=True)
                             try:
-                                end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=5.0)
+                                end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=30.0)
                                 if end_evt.type == EventType.ERROR:
                                     print(f"OTA failed: {end_evt.payload}")
                                 else:
@@ -3809,7 +3827,8 @@ def command_help():
     card                   : export this node URI                   e
     ver                    : firmware version                       v
     reboot                 : reboots node
-    ota <firmware.bin>     : upload firmware over-the-air (beebo)
+    ota <fw.bin> [buf%]    : upload firmware OTA; buf% = RAM buffer as
+                             % of file (default 100=whole file, 0=stream)
     set wifi <ssid> <pwd>  : provision WiFi credentials (beebo)
     sleep <secs>           : sleeps for a given amount of secs      s
     wait_key               : wait until user presses <Enter>        wk
