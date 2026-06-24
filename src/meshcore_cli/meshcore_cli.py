@@ -99,11 +99,76 @@ INVERT_SLASH = False
 # Beebo: STATS_TYPE_SYSTEM (3) — not yet in the meshcore library.
 # We monkey-patch the reader to handle it and dispatch a custom event.
 STATS_TYPE_SYSTEM = 3
+STATS_TYPE_TRANSPORT = 4
 CMD_GET_STATS = 56
 STATS_SYSTEM_EVENT = "stats_system"
+STATS_TRANSPORT_EVENT = "stats_transport"
 
-def _patch_reader_for_stats_system(mc):
-    """Wrap the reader's handle_rx to intercept STATS_TYPE_SYSTEM responses."""
+TLOG_NAMES = {
+    1: "MULTI lock",
+    2: "MULTI release",
+    3: "MULTI disconnect",
+    4: "MULTI session lost",
+    5: "TCP enable",
+    6: "TCP disable",
+    7: "TCP new client",
+    8: "TCP session ON",
+    9: "TCP session OFF",
+    10: "TCP power ON",
+    11: "TCP power OFF",
+    12: "CMD recv",
+    13: "CMD done",
+    14: "WiFi STA disconnect",   # 802.11 link layer (under the TCP transport)
+    15: "WiFi STA got IP",
+    16: "BLE link UP",
+    17: "BLE link DOWN",
+    18: "──── debuglog read ────",
+    19: "COEX PREFER_WIFI",
+}
+
+# Event types whose detail byte is a companion command code (see CMD_NAMES).
+TLOG_CMD_EVENTS = (12, 13)
+
+# MULTI events (lock/release/disconnect/lost) carry a stable transport TYPE id
+# as detail (firmware TLOG_XPORT_*), so naming is correct regardless of which
+# transports are enabled.
+TLOG_MULTI_EVENTS = (1, 2, 3, 4)
+MULTI_TRANSPORT_NAMES = {1: "BLE", 2: "USB", 3: "TCP"}
+
+# WiFi STA disconnect reason codes (esp_wifi_types.h) — common subset.
+WIFI_REASON = {
+    1: "UNSPECIFIED", 2: "AUTH_EXPIRE", 3: "AUTH_LEAVE", 4: "ASSOC_EXPIRE",
+    5: "ASSOC_TOOMANY", 8: "ASSOC_LEAVE", 15: "4WAY_HANDSHAKE_TIMEOUT",
+    23: "802_1X_AUTH_FAILED", 200: "BEACON_TIMEOUT", 201: "NO_AP_FOUND",
+    202: "AUTH_FAIL", 203: "ASSOC_FAIL", 204: "HANDSHAKE_TIMEOUT",
+    205: "CONNECTION_FAIL", 206: "AP_TSF_RESET", 207: "ROAMING",
+}
+
+# Companion command bytes -> names (for CMD recv/done trace events). Mirrors the
+# CMD_* defines in the firmware; unknown bytes fall back to hex.
+CMD_NAMES = {
+    1: "APP_START", 2: "SEND_TXT_MSG", 3: "SEND_CHANNEL_TXT_MSG", 4: "GET_CONTACTS",
+    5: "GET_DEVICE_TIME", 6: "SET_DEVICE_TIME", 7: "SEND_SELF_ADVERT", 8: "SET_ADVERT_NAME",
+    9: "ADD_UPDATE_CONTACT", 10: "SYNC_NEXT_MESSAGE", 11: "SET_RADIO_PARAMS",
+    12: "SET_RADIO_TX_POWER", 13: "RESET_PATH", 14: "SET_ADVERT_LATLON", 16: "REMOVE_CONTACT",
+    17: "SHARE_CONTACT", 18: "EXPORT_CONTACT", 19: "IMPORT_CONTACT", 20: "REBOOT",
+    21: "GET_BATT_AND_STORAGE", 22: "DEVICE_QUERY", 23: "EXPORT_PRIVATE_KEY",
+    24: "IMPORT_PRIVATE_KEY", 25: "SEND_RAW_DATA", 26: "SEND_LOGIN", 27: "SEND_STATUS_REQ",
+    28: "HAS_CONNECTION", 29: "LOGOUT", 30: "GET_CONTACT_BY_KEY", 31: "GET_CHANNEL",
+    32: "SET_CHANNEL", 33: "SIGN_START", 34: "SIGN_DATA", 35: "SIGN_FINISH",
+    36: "SEND_TRACE_PATH", 37: "SET_DEVICE_PIN", 38: "SET_OTHER_PARAMS", 39: "SEND_TELEMETRY_REQ",
+    40: "GET_CUSTOM_VARS", 41: "SET_CUSTOM_VAR", 42: "GET_ADVERT_PATH", 43: "GET_TUNING_PARAMS",
+    44: "GET_RADIO_FEM_RXGAIN", 45: "SET_RADIO_FEM_RXGAIN", 46: "GET_RADIO_RXGAIN",
+    47: "SET_RADIO_RXGAIN", 48: "APP_DISCONNECT", 50: "SEND_BINARY_REQ", 51: "FACTORY_RESET",
+    52: "SEND_PATH_DISCOVERY_REQ", 54: "SET_FLOOD_SCOPE_KEY", 55: "SEND_CONTROL_DATA",
+    56: "GET_STATS", 57: "SEND_ANON_REQ", 58: "SET_AUTOADD_CONFIG", 59: "GET_AUTOADD_CONFIG",
+    60: "GET_ALLOWED_REPEAT_FREQ", 61: "SET_PATH_HASH_MODE", 62: "SEND_CHANNEL_DATA",
+    63: "SET_DEFAULT_FLOOD_SCOPE", 64: "GET_DEFAULT_FLOOD_SCOPE", 65: "SEND_RAW_PACKET",
+    128: "OTA_BEGIN", 129: "OTA_WRITE", 130: "OTA_END", 131: "SET_WIFI_CREDS",
+}
+
+def _patch_reader_for_beebo_stats(mc):
+    """Wrap the reader's handle_rx to intercept beebo-specific STATS responses."""
     original_handle_rx = mc._reader.handle_rx
 
     async def patched_handle_rx(data: bytearray):
@@ -121,6 +186,23 @@ def _patch_reader_for_stats_system(mc):
             except struct.error as e:
                 logger.error(f"Error parsing stats system frame: {e}")
                 await mc.dispatcher.dispatch(Event(EventType.ERROR, {"reason": f"binary_parse_error: {e}"}))
+        elif len(data) >= 6 and data[0] == 24 and data[1] == STATS_TYPE_TRANSPORT:
+            try:
+                total = struct.unpack('<H', data[2:4])[0]
+                offset = struct.unpack('<H', data[4:6])[0]
+                events = []
+                pos = 6
+                while pos + 6 <= len(data):
+                    ms = struct.unpack('<I', data[pos:pos+4])[0]
+                    etype = data[pos+4]
+                    detail = data[pos+5]  # raw byte; interpreted per event type
+                    events.append({'millis': ms, 'type': etype, 'detail': detail})
+                    pos += 6
+                await mc.dispatcher.dispatch(Event(STATS_TRANSPORT_EVENT,
+                                                   {'total': total, 'offset': offset, 'events': events}))
+            except struct.error as e:
+                logger.error(f"Error parsing transport log frame: {e}")
+                await mc.dispatcher.dispatch(Event(EventType.ERROR, {"reason": f"binary_parse_error: {e}"}))
         else:
             await original_handle_rx(data)
 
@@ -130,6 +212,67 @@ async def get_stats_system(mc):
     """Send CMD_GET_STATS with STATS_TYPE_SYSTEM and wait for the response."""
     cmd = bytes([CMD_GET_STATS, STATS_TYPE_SYSTEM])
     return await mc.commands.send(cmd, [STATS_SYSTEM_EVENT, EventType.ERROR])
+
+async def get_stats_transport(mc, offset=0):
+    """Fetch one page of the debug ring starting at logical index `offset`."""
+    cmd = bytes([CMD_GET_STATS, STATS_TYPE_TRANSPORT, offset & 0xFF, (offset >> 8) & 0xFF])
+    return await mc.commands.send(cmd, [STATS_TRANSPORT_EVENT, EventType.ERROR])
+
+def signed_tx_power(v):
+    """The firmware stores tx_power as int8_t (-9..MAX), but it arrives in
+    self_info as an unsigned byte (e.g. -9 -> 247). Re-interpret as signed."""
+    return v - 256 if v is not None and v > 127 else v
+
+async def set_tx_power_signed(mc, val):
+    """Set radio TX power, supporting negative dBm values.
+
+    CMD_SET_RADIO_TX_POWER (0x0c): the firmware reads the low byte as int8_t
+    and accepts -9..MAX. The library helper set_tx_power() uses unsigned
+    to_bytes and raises OverflowError on negative values, so send signed
+    bytes directly (the low byte is identical for non-negative values).
+    """
+    return await mc.commands.send(
+        b"\x0c" + int(val).to_bytes(4, "little", signed=True),
+        [EventType.OK, EventType.ERROR])
+
+async def send_with_retry(send_factory, retries=3, label="command", delay=1.0):
+    """Await an Event-returning send coroutine, retrying transient timeouts.
+
+    `send_factory` is a zero-arg callable returning the awaitable (so each
+    retry issues a fresh send). Only retries on 'no_event_received'/'timeout'
+    (the symptoms of WiFi latency spikes); hard errors are returned as-is.
+    """
+    res = None
+    for attempt in range(1, retries + 1):
+        res = await send_factory()
+        if res.type != EventType.ERROR:
+            return res
+        reason = res.payload.get("reason") if isinstance(res.payload, dict) else None
+        if reason not in ("no_event_received", "timeout"):
+            return res  # genuine error — don't retry
+        if attempt < retries:
+            logger.warning(f"  {label} timed out, retry {attempt}/{retries - 1}...")
+            await asyncio.sleep(delay)
+    return res
+
+CMD_GET_TRANSPORT_CONFIG = 132
+CMD_SET_TRANSPORT_CONFIG = 133
+
+async def get_transport_config(mc):
+    """Return (ble_enabled, tcp_enabled, usb_enabled) from the node, or None on error."""
+    res = await mc.commands.send(bytes([CMD_GET_TRANSPORT_CONFIG]), [EventType.OK, EventType.ERROR])
+    if res.type == EventType.ERROR:
+        return None
+    v = res.payload.get("value", 0)
+    return (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
+
+async def set_transport_config(mc, ble_enabled, tcp_enabled, usb_enabled):
+    """Persist BLE/TCP/USB transport enables on the node (applied at next reboot).
+    The node enforces the invariant that at least one of BLE/TCP stays on."""
+    return await mc.commands.send(
+        bytes([CMD_SET_TRANSPORT_CONFIG, 1 if ble_enabled else 0,
+               1 if tcp_enabled else 0, 1 if usb_enabled else 0]),
+        [EventType.OK, EventType.ERROR])
 
 def escape_ansi(line):
     ansi_escape = re.compile(r'(?:\x1B[@-_]|[\x80-\x9F])[0-?]*[ -/]*[@-~]')
@@ -549,6 +692,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
         "clock" : {"sync" : None},
         "reboot" : None,
         "ota" : None,
+        "debuglog" : None,
         "card" : None,
         "upload_card" : None,
         "contacts": None,
@@ -1937,6 +2081,7 @@ async def get_contact_from_arg(mc, arg):
 async def next_cmd(mc, cmds, json_output=False):
     """ process next command """
     global ARROW_HEAD, SLASH_START, SLASH_END, INVERT_SLASH
+    _cmd_t0 = time.monotonic()
     try :
         argnum = 0
 
@@ -2156,14 +2301,19 @@ async def next_cmd(mc, cmds, json_output=False):
                         else:
                             print("ok")
                     case "tx" | "txpower" | "radio.tx" | "radio.txpower":
-                        res = await mc.commands.set_tx_power(cmds[2])
-                        logger.debug(res)
-                        if res.type == EventType.ERROR:
-                            print(f"Error: {res}")
-                        elif json_output :
-                            print(json.dumps({cmds[1]: int(cmds[2])}))
+                        try:
+                            tx_val = int(cmds[2])
+                        except ValueError:
+                            print(f"Error: invalid txpower '{cmds[2]}' (expected integer dBm)")
                         else:
-                            print("ok")
+                            res = await set_tx_power_signed(mc, tx_val)
+                            logger.debug(res)
+                            if res.type == EventType.ERROR:
+                                print(f"Error: {res}")
+                            elif json_output :
+                                print(json.dumps({cmds[1]: tx_val}))
+                            else:
+                                print("ok")
                     case "fem.rxgain" | "radio.fem.rxgain":
                         val = 1 if cmds[2] == "on" else 0
                         res = await mc.commands.send(b"\x2d" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
@@ -2341,6 +2491,34 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(f"Error: {res}")
                         else:
                             print(f"WiFi credentials saved ({ssid}).")
+                    case "ble" | "tcp" | "usb":  # beebo: enable/disable a transport (persisted)
+                        cfg = await get_transport_config(mc)
+                        if cfg is None:
+                            print("Error: transport config unsupported by this firmware")
+                        else:
+                            ble_en, tcp_en, usb_en = cfg
+                            on = cmds[2] == "on"
+                            if cmds[1] == "ble":
+                                ble_en = on
+                            elif cmds[1] == "tcp":
+                                tcp_en = on
+                            else:
+                                usb_en = on
+                            res = await set_transport_config(mc, ble_en, tcp_en, usb_en)
+                            if res.type == EventType.ERROR:
+                                print(f"Error: {res}")
+                            else:
+                                # Re-read: the node may have overridden us to keep
+                                # at least one remote transport on.
+                                cfg2 = await get_transport_config(mc) or (ble_en, tcp_en, usb_en)
+                                b, t, u = cfg2
+                                if json_output:
+                                    print(json.dumps({"ble": bool(b), "tcp": bool(t), "usb": bool(u)}))
+                                else:
+                                    print(f"ble={'on' if b else 'off'}, tcp={'on' if t else 'off'}, "
+                                          f"usb={'on' if u else 'off'} — reboot to apply")
+                                    if on != (b if cmds[1]=='ble' else t if cmds[1]=='tcp' else u):
+                                        print("  (kept a remote transport on to avoid lockout)")
                     case _: # custom var
                         if cmds[1].startswith("_") :
                             vname = cmds[1][1:]
@@ -2359,6 +2537,23 @@ async def next_cmd(mc, cmds, json_output=False):
                 match cmds[1]:
                     case "help":
                         get_help_for("get")
+                    case "ble" | "tcp" | "usb" | "transport":  # beebo: transport enable flags
+                        cfg = await get_transport_config(mc)
+                        if cfg is None:
+                            print("Error: transport config unsupported by this firmware")
+                        else:
+                            ble_en, tcp_en, usb_en = cfg
+                            if json_output:
+                                print(json.dumps({"ble": bool(ble_en), "tcp": bool(tcp_en), "usb": bool(usb_en)}))
+                            elif cmds[1] == "ble":
+                                print("on" if ble_en else "off")
+                            elif cmds[1] == "tcp":
+                                print("on" if tcp_en else "off")
+                            elif cmds[1] == "usb":
+                                print("on" if usb_en else "off")
+                            else:
+                                print(f"ble={'on' if ble_en else 'off'}, tcp={'on' if tcp_en else 'off'}, "
+                                      f"usb={'on' if usb_en else 'off'}")
                     case "max_flood_attempts":
                         if json_output :
                             print(json.dumps({"max_flood_attempts" : msg_ack.max_flood_attempts}))
@@ -2437,10 +2632,11 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(mc.self_info["name"])
                     case "tx" | "txpower" | "radio.tx" | "radio.txpower":
                         await mc.commands.send_appstart()
+                        tx = signed_tx_power(mc.self_info["tx_power"])
                         if json_output :
-                            print(json.dumps({cmds[1]: mc.self_info["tx_power"]}))
+                            print(json.dumps({cmds[1]: tx}))
                         else:
-                            print(mc.self_info["tx_power"])
+                            print(tx)
                     case "fem.rxgain" | "radio.fem.rxgain":
                         res = await mc.commands.send(b"\x2c", [EventType.OK, EventType.ERROR])
                         if res.type == EventType.ERROR:
@@ -2691,6 +2887,109 @@ async def next_cmd(mc, cmds, json_output=False):
                                 else:
                                     print(val)
 
+            case "uptime":
+                dev = await mc.commands.send_device_query()
+                core = await mc.commands.get_stats_core()
+                radio = await mc.commands.get_stats_radio()
+                sys_stats = await get_stats_system(mc)
+                if dev.type == EventType.ERROR:
+                    print(f"ERROR: {dev}")
+                else:
+                    p = dev.payload
+                    print(f" Model:       {p.get('model', '?')}")
+                    print(f" Version:     {p.get('ver', '?')}")
+                    print(f" Build:       {p.get('fw_build', '?')}")
+                    if core.type != EventType.ERROR:
+                        c = core.payload
+                        secs = c['uptime_secs']
+                        days, rem = divmod(secs, 86400)
+                        hours, rem = divmod(rem, 3600)
+                        mins, s = divmod(rem, 60)
+                        parts = []
+                        if days:
+                            parts.append(f"{days}d")
+                        if hours:
+                            parts.append(f"{hours}h")
+                        if mins:
+                            parts.append(f"{mins}m")
+                        parts.append(f"{s}s")
+                        print(f" Uptime:      {' '.join(parts)}")
+                        bat = c['battery_mv']
+                        if bat > 0:
+                            print(f" Battery:     {bat / 1000:.2f} V")
+                        print(f" Queue:       {c['queue_len']} packets")
+                        print(f" Errors:      {c['errors']}")
+                    if radio.type != EventType.ERROR:
+                        r = radio.payload
+                        print(f" Noise floor: {r['noise_floor']} dBm")
+                        print(f" Last RSSI:   {r['last_rssi']} dBm")
+                        print(f" Last SNR:    {r['last_snr']:.1f} dB")
+                        print(f" TX airtime:  {r['tx_air_secs']} s")
+                        print(f" RX airtime:  {r['rx_air_secs']} s")
+                    await mc.commands.send_appstart()
+                    if 'tx_power' in mc.self_info:
+                        print(f" TX power:    {signed_tx_power(mc.self_info['tx_power'])} dBm")
+                    rxgain_res = await mc.commands.send(b"\x2e", [EventType.OK, EventType.ERROR])
+                    if rxgain_res.type != EventType.ERROR:
+                        print(f" RX boosted:  {'on' if rxgain_res.payload.get('value', 0) else 'off'}")
+                    fem_res = await mc.commands.send(b"\x2c", [EventType.OK, EventType.ERROR])
+                    if fem_res.type != EventType.ERROR:
+                        print(f" LNA enabled: {'on' if fem_res.payload.get('value', 0) else 'off'}")
+                    if sys_stats.type != EventType.ERROR:
+                        s = sys_stats.payload
+                        print(f" Free heap:   {s['free_heap'] / 1024:.0f} kB")
+                        print(f" Free PSRAM:  {s['free_psram'] / 1024:.0f} kB")
+                        print(f" Flash:       {s['flash_size'] / (1024 * 1024):.0f} MB")
+                        print(f" MCU temp:    {s['mcu_temp']:.1f} °C")
+
+            case "debuglog":
+                # Paginate the ring: keep fetching pages until we've collected
+                # `total` events (the firmware skips logging these fetches, so
+                # the ring stays stable across pages).
+                events = []
+                total = None
+                offset = 0
+                while True:
+                    res = await get_stats_transport(mc, offset)
+                    if res.type == EventType.ERROR:
+                        break
+                    total = res.payload.get('total', 0)
+                    page = res.payload.get('events', [])
+                    if not page:
+                        break
+                    events.extend(page)
+                    offset += len(page)
+                    if offset >= total:
+                        break
+                if total is None:
+                    print("Transport log not available (firmware may not support STATS_TYPE_TRANSPORT)")
+                elif not events:
+                    print(" No transport events recorded.")
+                else:
+                    t0 = events[0]['millis']
+                    print(f" {'Uptime':>13s}   {'Delta':>12s}   Event")
+                    print(f" {'─'*13}   {'─'*12}   {'─'*28}")
+                    prev = t0
+                    for ev in events:
+                        ms = ev['millis']
+                        secs = ms / 1000.0
+                        delta = (ms - prev) / 1000.0
+                        name = TLOG_NAMES.get(ev['type'], f"unknown({ev['type']})")
+                        detail = ev['detail']
+                        if ev['type'] in TLOG_CMD_EVENTS:
+                            cmd_name = CMD_NAMES.get(detail, "")
+                            detail_str = f" 0x{detail:02x}" + (f" {cmd_name}" if cmd_name else "")
+                        elif ev['type'] == 14:  # WiFi STA disconnect — detail is reason code
+                            reason = WIFI_REASON.get(detail, "")
+                            detail_str = f" reason={detail}" + (f" {reason}" if reason else "")
+                        elif ev['type'] in TLOG_MULTI_EVENTS:  # detail = transport index
+                            tname = MULTI_TRANSPORT_NAMES.get(detail, f"idx{detail}")
+                            detail_str = f" [{tname}]"
+                        else:
+                            detail_str = f" [{detail}]" if detail != 0 else ""
+                        print(f" {secs:>12.3f}s   {delta:>+11.3f}s   {name}{detail_str}")
+                        prev = ms
+
             case "self_telemetry" | "t":
                 res = await mc.commands.get_self_telemetry()
                 logger.debug(res)
@@ -2766,18 +3065,19 @@ async def next_cmd(mc, cmds, json_output=False):
             case "ota":
                 argnum = 2
                 fw_file = cmds[1]
-                buf_pct = 100
+                OTA_DEFAULT_BUF_KB = 0
+                buf_kb = OTA_DEFAULT_BUF_KB
                 if len(cmds) >= 3:
                     try:
-                        buf_pct = int(cmds[2])
-                        if buf_pct < 0 or buf_pct > 100:
-                            print("Buffer % must be 0-100")
-                            buf_pct = -1
+                        buf_kb = int(cmds[2])
+                        if buf_kb < 0:
+                            print("Buffer size must be >= 0 kB")
+                            buf_kb = -1
                     except ValueError:
-                        print(f"Invalid buffer %: {cmds[2]}")
-                        buf_pct = -1
+                        print(f"Invalid buffer size: {cmds[2]}")
+                        buf_kb = -1
                 fw_data = None
-                if buf_pct >= 0:
+                if buf_kb >= 0:
                     try:
                         with open(fw_file, "rb") as f:
                             fw_data = f.read()
@@ -2790,12 +3090,11 @@ async def next_cmd(mc, cmds, json_output=False):
                     basename = os.path.splitext(os.path.basename(fw_file))[0]
                     new_ver = basename.split("-", 2)[-1] if basename.count("-") >= 2 else basename
                     total = len(fw_data)
+                    buf_pct = min(buf_kb * 1024 * 100 // total, 100) if buf_kb > 0 else 0
                     if buf_pct == 0:
-                        buf_desc = "streaming (no RAM buffer)"
+                        print(f"OTA upload: {fw_file} ({total} bytes, streaming)")
                     else:
-                        buf_kb = total * buf_pct // 100 // 1024
-                        buf_desc = f"{buf_pct}% buffered ({buf_kb} kB RAM)"
-                    print(f"OTA upload: {fw_file} ({total} bytes, {buf_desc})")
+                        print(f"OTA upload: {fw_file} ({total} bytes, {buf_kb} kB buffer)")
                     print(f"  {old_ver}  →  {new_ver}")
                     ota_start_time = time.monotonic()
                     begin_evt = await mc.commands.send(
@@ -2806,16 +3105,8 @@ async def next_cmd(mc, cmds, json_output=False):
                         print(f"OTA failed to start: {begin_evt.payload}")
                     else:
                         chunk_size = begin_evt.payload.get("chunk_size", 128)
-                        buf_cap = begin_evt.payload.get("buf_cap", 0) or (total * buf_pct // 100 if buf_pct > 0 else 0)
                         total_chunks = (total + chunk_size - 1) // chunk_size
-                        if buf_cap > 0:
-                            n_bufs = (total + buf_cap - 1) // buf_cap
-                            print(f"  Chunk size: {chunk_size} bytes, buffer: {buf_cap // 1024} kB × {n_bufs}")
-                        else:
-                            print(f"  Chunk size: {chunk_size} bytes, direct to flash")
                         failed = False
-                        bytes_in_buf = 0
-                        bytes_flashed = 0
                         with Progress(
                             TextColumn("[bold blue]{task.description:<14}"),
                             BarColumn(),
@@ -2823,11 +3114,15 @@ async def next_cmd(mc, cmds, json_output=False):
                             TransferSpeedColumn(),
                             TimeRemainingColumn(),
                         ) as progress:
-                            xfer_task = progress.add_task("Transfer ...", total=total)
-                            flash_task = progress.add_task("Flashing ...", total=total)
+                            finalize_size = total // 100 or 1
+                            buf_cap = total * buf_pct // 100 if buf_pct > 0 else 0
+                            bytes_in_buf = 0
+                            task = progress.add_task("Transfer ...", total=total)
                             for idx in range(0, total, chunk_size):
                                 chunk = fw_data[idx : idx + chunk_size]
                                 chunk_num = (idx // chunk_size) + 1
+                                if buf_cap > 0 and bytes_in_buf + len(chunk) >= buf_cap:
+                                    progress.update(task, description="Flashing ...")
                                 evt = await mc.commands.ota_write(chunk)
                                 if evt.type == EventType.ERROR:
                                     if evt.payload.get("reason") == "no_event_received":
@@ -2838,28 +3133,27 @@ async def next_cmd(mc, cmds, json_output=False):
                                         print(f"OTA failed at chunk {chunk_num}/{total_chunks}: {evt.payload}")
                                         failed = True
                                         break
-                                progress.update(xfer_task, advance=len(chunk))
                                 if buf_cap > 0:
                                     bytes_in_buf += len(chunk)
                                     if bytes_in_buf >= buf_cap:
                                         bytes_in_buf -= buf_cap
-                                        bytes_flashed += buf_cap
-                                        progress.update(flash_task, completed=bytes_flashed)
-                                else:
-                                    progress.update(flash_task, advance=len(chunk))
+                                        progress.update(task, description="Transfer ...")
+                                advance = len(chunk)
+                                if progress.tasks[task].completed + advance >= total - finalize_size:
+                                    advance = max(0, total - finalize_size - int(progress.tasks[task].completed))
+                                progress.update(task, advance=advance)
                             if not failed:
-                                progress.update(xfer_task, description="Finalizing ...")
-                                progress.update(flash_task, description="Finalizing ...")
+                                progress.update(task, description="Finalizing ...")
                                 try:
-                                    end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=30.0)
+                                    end_evt = await asyncio.wait_for(mc.commands.ota_end(), timeout=60.0)
                                     if end_evt.type == EventType.ERROR and end_evt.payload.get("reason") != "no_event_received":
                                         progress.stop()
                                         print(f"OTA failed: {end_evt.payload}")
                                         failed = True
                                     else:
-                                        progress.update(flash_task, completed=total)
+                                        progress.update(task, completed=total)
                                 except (asyncio.TimeoutError, OSError):
-                                    progress.update(flash_task, completed=total)
+                                    progress.update(task, completed=total)
                         if not failed:
                             elapsed = int(time.monotonic() - ota_start_time)
                             print(f"OTA completed in {elapsed}s — rebooting into {new_ver}.")
@@ -2872,25 +3166,48 @@ async def next_cmd(mc, cmds, json_output=False):
                     import datetime
                     noise_test = cmds[1]
 
-                    async def sample_noise_floor(mc, n=10, interval=1.0):
+                    async def sample_noise_floor(mc, n=5, interval=2.5):
+                        # The firmware already reports a 64-sample average that it
+                        # recomputes ~every 2s (NOISE_FLOOR_CALIB_INTERVAL). So we
+                        # only take a few reads spaced >= that interval to get
+                        # genuinely independent averages; reading faster just
+                        # returns the same cached value. A 0 reading means the
+                        # floor hasn't reconverged yet (e.g. just after resetAGC)
+                        # — retry rather than count it.
+                        # Returns (min, avg, max) so the caller can report the
+                        # spike-free floor (min) alongside the spread, or None.
                         samples = []
-                        for i in range(n):
-                            if i > 0:
+                        attempts = 0
+                        max_attempts = n + 5
+                        while len(samples) < n and attempts < max_attempts:
+                            if attempts > 0:
                                 await asyncio.sleep(interval)
-                            res = await mc.commands.get_stats_radio()
+                            attempts += 1
+                            res = await send_with_retry(lambda: mc.commands.get_stats_radio(),
+                                                        label="noise read")
                             if res.type == EventType.ERROR:
                                 logger.error(f"Failed to read noise floor: {res.payload}")
-                                return None
+                                continue  # transient — keep trying within max_attempts
                             nf = res.payload["noise_floor"]
+                            if nf == 0:
+                                logger.info(f"  (skipping uncalibrated 0 reading)")
+                                continue
                             samples.append(nf)
-                            logger.info(f"  Sample {i+1}/{n}: noise_floor = {nf} dBm")
-                        avg = sum(samples) / len(samples)
-                        logger.info(f"  Average: {avg:.1f} dBm")
-                        return avg
+                            logger.info(f"  Sample {len(samples)}/{n}: noise_floor = {nf} dBm")
+                        if not samples:
+                            logger.error("  No valid noise floor readings (floor never calibrated)")
+                            return None
+                        nf_min = min(samples)
+                        nf_max = max(samples)
+                        nf_avg = sum(samples) / len(samples)
+                        logger.info(f"  min={nf_min} avg={nf_avg:.1f} max={nf_max} dBm")
+                        return (nf_min, nf_avg, nf_max)
 
                     async def set_rxgain(mc, on):
                         val = 1 if on else 0
-                        res = await mc.commands.send(b"\x2f" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
+                        res = await send_with_retry(
+                            lambda: mc.commands.send(b"\x2f" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR]),
+                            label="set rxgain")
                         if res.type == EventType.ERROR:
                             logger.error(f"Failed to set rxgain: {res.payload}")
                             return False
@@ -2899,7 +3216,9 @@ async def next_cmd(mc, cmds, json_output=False):
 
                     async def set_fem_rxgain(mc, on):
                         val = 1 if on else 0
-                        res = await mc.commands.send(b"\x2d" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
+                        res = await send_with_retry(
+                            lambda: mc.commands.send(b"\x2d" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR]),
+                            label="set fem.rxgain")
                         if res.type == EventType.ERROR:
                             logger.error(f"Failed to set fem.rxgain: {res.payload}")
                             return False
@@ -2910,9 +3229,9 @@ async def next_cmd(mc, cmds, json_output=False):
                         "noise_internal": {
                             "title": "Internal Noise Floor Measurement",
                             "subtitle": "noise floor (50 ohm stub)",
-                            "setup": "txpower: 0, 50 ohm termination",
+                            "setup": "txpower: -9, 50 ohm termination",
                             "steps": [
-                                "set radio.txpower to 0",
+                                "set radio.txpower to -9",
                                 "Power off board",
                                 "Replace antenna with 50 ohm termination stub",
                                 "Power on board",
@@ -2926,9 +3245,9 @@ async def next_cmd(mc, cmds, json_output=False):
                         "noise_combined": {
                             "title": "Combined Noise Floor Measurement",
                             "subtitle": "noise floor (antenna, in-band + out-of-band)",
-                            "setup": "txpower: 0, antenna connected",
+                            "setup": "txpower: -9, antenna connected",
                             "steps": [
-                                "set radio.txpower to 0",
+                                "set radio.txpower to -9",
                                 "Connect the real antenna (not 50 ohm stub)",
                                 "Power on board",
                                 "Run this test",
@@ -2943,9 +3262,9 @@ async def next_cmd(mc, cmds, json_output=False):
                         "noise_in_band": {
                             "title": "In-Band Noise Floor Measurement",
                             "subtitle": "noise floor (antenna + bandpass filter, in-band only)",
-                            "setup": "txpower: 0, antenna + bandpass filter",
+                            "setup": "txpower: -9, antenna + bandpass filter",
                             "steps": [
-                                "set radio.txpower to 0",
+                                "set radio.txpower to -9",
                                 "Power off board",
                                 "Connect bandpass filter between antenna and board RF port",
                                 "Power on board",
@@ -2992,13 +3311,18 @@ async def next_cmd(mc, cmds, json_output=False):
                     ]
                     results = []
 
-                    logger.info("Setup: setting txpower to 0")
-                    res = await mc.commands.set_tx_power("0")
+                    logger.info("Setup: setting txpower to -9 (minimum)")
+                    # Tolerate WiFi latency spikes during the idle measurement
+                    # gaps by raising the per-command timeout (restored below).
+                    _saved_timeout = mc.commands.default_timeout
+                    mc.commands.default_timeout = 30
+                    res = await set_tx_power_signed(mc, -9)
                     if res.type == EventType.ERROR:
+                        mc.commands.default_timeout = _saved_timeout
                         print(f"Error setting txpower: {res.payload}")
                     else:
                         print(f"{proc['title']}")
-                        print(f"  txpower = 0, sampling 10 readings per config\n")
+                        print(f"  txpower = -9, sampling 5 firmware averages per config\n")
 
                         for rxgain_str, fem_str in configs:
                             rxgain_on = rxgain_str == "on"
@@ -3011,26 +3335,34 @@ async def next_cmd(mc, cmds, json_output=False):
                                 results.append((rxgain_str, fem_str, None))
                                 continue
                             await asyncio.sleep(5.0)
-                            avg = await sample_noise_floor(mc)
-                            results.append((rxgain_str, fem_str, avg))
+                            vals = await sample_noise_floor(mc)
+                            results.append((rxgain_str, fem_str, vals))
 
-                        # Build markdown table
+                        mc.commands.default_timeout = _saved_timeout
+
+                        # Build markdown table. `min` is the reported (spike-free)
+                        # noise floor; `avg`/`max` show the spread — a large
+                        # spread indicates intermittent interference.
                         lines = []
                         if insertion_loss > 0:
-                            lines.append("| rxgain | fem.rxgain | measured (dBm) | corrected (dBm) |")
-                            lines.append("|--------|------------|----------------|-----------------|")
-                            for rxgain_str, fem_str, avg in results:
-                                if avg is not None:
-                                    corrected = avg + insertion_loss
-                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {avg:>14.1f} | {corrected:>15.1f} |")
+                            lines.append("| rxgain | fem.rxgain | min (dBm) | avg (dBm) | max (dBm) | corr. min (dBm) |")
+                            lines.append("|--------|------------|-----------|-----------|-----------|-----------------|")
+                            for rxgain_str, fem_str, vals in results:
+                                if vals is not None:
+                                    nf_min, nf_avg, nf_max = vals
+                                    corr = nf_min + insertion_loss
+                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {nf_min:>9.1f} | {nf_avg:>9.1f} | {nf_max:>9.1f} | {corr:>15.1f} |")
                                 else:
-                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {'ERROR':>14} | {'—':>15} |")
+                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {'ERROR':>9} | {'—':>9} | {'—':>9} | {'—':>15} |")
                         else:
-                            lines.append("| rxgain | fem.rxgain | noise_floor (dBm) |")
-                            lines.append("|--------|------------|-------------------|")
-                            for rxgain_str, fem_str, avg in results:
-                                nf_str = f"{avg:.1f}" if avg is not None else "ERROR"
-                                lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {nf_str:>17} |")
+                            lines.append("| rxgain | fem.rxgain | min (dBm) | avg (dBm) | max (dBm) |")
+                            lines.append("|--------|------------|-----------|-----------|-----------|")
+                            for rxgain_str, fem_str, vals in results:
+                                if vals is not None:
+                                    nf_min, nf_avg, nf_max = vals
+                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {nf_min:>9.1f} | {nf_avg:>9.1f} | {nf_max:>9.1f} |")
+                                else:
+                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {'ERROR':>9} | {'—':>9} | {'—':>9} |")
                         table = "\n".join(lines)
 
                         print(f"\n{table}")
@@ -3067,9 +3399,9 @@ async def next_cmd(mc, cmds, json_output=False):
                     print()
 
                     measurements = []
-                    for pwr in range(0, 23):
+                    for pwr in range(-9, 23):
                         logger.info(f"Setting txpower = {pwr}")
-                        res = await mc.commands.set_tx_power(str(pwr))
+                        res = await set_tx_power_signed(mc, pwr)
                         if res.type == EventType.ERROR:
                             print(f"Error setting txpower to {pwr}: {res.payload}")
                             break
@@ -3105,7 +3437,9 @@ async def next_cmd(mc, cmds, json_output=False):
                         # Reference gain from the first valid measurement
                         valid = [(p, m) for p, m in measurements if m is not None]
                         ref_gain = None
+                        ref_pwr = None
                         if valid:
+                            ref_pwr = valid[0][0]
                             ref_gain = valid[0][1] - valid[0][0]
 
                         p1db_pwr = None
@@ -3135,7 +3469,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(f"\nP1dB point: txpower = {p1db_pwr} (compression >= 1 dB)")
                         elif ref_gain is not None:
                             print(f"\nP1dB point: not reached (max compression < 1 dB)")
-                        print(f"Reference gain: {ref_gain:.1f} dB (from txpower=0)")
+                        print(f"Reference gain: {ref_gain:.1f} dB (from txpower={ref_pwr})")
 
                         # Write files
                         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3156,7 +3490,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             f.write(f"{table}\n")
                             if p1db_pwr is not None:
                                 f.write(f"\nP1dB point: txpower = {p1db_pwr}\n")
-                            f.write(f"\nReference gain: {ref_gain:.1f} dB (from txpower=0)\n")
+                            f.write(f"\nReference gain: {ref_gain:.1f} dB (from txpower={ref_pwr})\n")
 
                         with open(csv_file, "w") as f:
                             f.write("txpower,measured_dBm,gain_dB,compression_dB\n")
@@ -4161,7 +4495,8 @@ async def next_cmd(mc, cmds, json_output=False):
 
                 await interactive_loop(mc, to=contact)
 
-        logger.debug(f"cmd {cmds[0:argnum+1]} processed ...")
+        _cmd_elapsed = time.monotonic() - _cmd_t0
+        logger.debug(f"cmd {cmds[0:argnum+1]} processed in {_cmd_elapsed:.3f}s")
         return cmds[argnum+1:]
 
     except IndexError:
@@ -4214,8 +4549,8 @@ def command_help():
     measure noise_combined : combined noise floor (antenna)
     measure noise_in_band  : in-band noise floor (antenna + BPF)
     measure txpower_curve  : TX power curve, P1dB compression
-    ota <fw.bin> [buf%]    : upload firmware OTA; buf% = RAM buffer
-                             as % of file (100=whole file, 0=stream)
+    ota <fw.bin> [buf_kB]  : upload firmware OTA; buf_kB = PSRAM buffer
+                             in kB (default 512, 0=stream)
                              default: 100
     set wifi <ssid> <pwd>  : provision WiFi credentials (beebo)
     sleep <secs>           : sleeps for a given amount of secs      s
@@ -4365,11 +4700,13 @@ def get_help_for (cmdname, context="line") :
     print_path_updates : display path updates as they come
     custom             : all custom variables in json format
                 each custom var can also be get/set directly
+    uptime             : device info + all stats, formatted with units
     stats/status       : print status of the node
     stats_core         : core stats (bat/error/uptime/queue)
     stats_radio        : radio stats (noise/rssi/snr/tx_air/rx_air)
     stats_packets      : packets stats (recv/sent/flood/direct)
     stats_system       : system stats (heap/psram/flash/temp) [beebo]
+    debuglog           : transport event log (lock/release/WiFi state) [beebo]
     allowed_repeat_freq: possible frequency ranges for repeater mode
     path_hash_mode
 """)
@@ -4641,6 +4978,7 @@ REPEATER_HELP = f"""
   clock               - Show current time
 
 {ANSI_BGREEN}Stats:{ANSI_END}
+  uptime              - Device info + all stats with units
   stats-core          - Core stats (uptime, battery, queue)
   stats-radio         - Radio stats (RSSI, SNR, noise floor)
   stats-packets       - Packet statistics (sent/recv counts)
@@ -5112,6 +5450,12 @@ async def main(argv):
 
     if (debug==True):
         logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        logger.handlers.clear()
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s:%(name)s:%(message)s',
+                                               datefmt='%H:%M:%S'))
+        logger.addHandler(handler)
     elif (json_output or quiet) :
         logger.setLevel(logging.ERROR)
 
@@ -5135,14 +5479,21 @@ async def main(argv):
         logger.info(f"{ANSI_BGRAY}Disconnected from repeater.{ANSI_END}")
         return
 
+    _t0 = time.monotonic()
+    def _phase(label):
+        logger.debug(f"TIMING {label}: {time.monotonic() - _t0:.3f}s")
+
     mc = None
     if not hostname is None : # connect via tcp
         delays = [1.0, 2.0, 3.0]   # retry up to 3 times with increasing delays
         for attempt, delay in enumerate(delays, 1):
             try:
+                _phase(f"tcp connect attempt {attempt}")
                 mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=(json_output or quiet))
+                _phase("tcp connected + appstart done")
                 break
             except OSError as e:
+                _phase(f"tcp connect failed: {e}")
                 if attempt == len(delays):
                     print(f"Could not connect to {hostname}:{port} — {e}")
                     print("The node may already have an active companion session (phone app, another CLI).")
@@ -5262,7 +5613,7 @@ async def main(argv):
     handle_path_update.mc = mc
     handle_log_rx.mc = mc
 
-    _patch_reader_for_stats_system(mc)
+    _patch_reader_for_beebo_stats(mc)
 
     mc.subscribe(EventType.ADVERTISEMENT, handle_advert)
     mc.subscribe(EventType.PATH_UPDATE, handle_path_update)
@@ -5272,12 +5623,16 @@ async def main(argv):
     mc.auto_update_contacts = True
     mc.set_decrypt_channel_logs(True)
 
+    _phase("device_query start")
     res = await mc.commands.send_device_query()
+    _phase("device_query done")
     if res.type == EventType.ERROR :
         logger.error(f"Error while querying device: {res}")
         return
 
+    _phase("set_time start")
     await mc.commands.set_time(int(time.time()))
+    _phase("set_time done")
 
     if os.path.isdir(MCCLI_CONFIG_DIR) :
         log_message.file = MCCLI_CONFIG_DIR + (mc.self_info["name"].replace("/","")) + ".msgs"
@@ -5321,6 +5676,13 @@ async def main(argv):
         logger.debug("Disconnected.")
 
 def cli():
+    # Force UTF-8 on stdout/stderr so non-ASCII output (box-drawing, em-dash,
+    # arrows) works on Windows (cp1252) too, including when redirected to a file.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     try:
         asyncio.run(main(sys.argv[1:]))
     except KeyboardInterrupt:
