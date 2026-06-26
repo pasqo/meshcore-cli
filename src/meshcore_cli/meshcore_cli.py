@@ -3533,7 +3533,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             info_evt = await mc.commands.send_device_query()
                             if info_evt.type != EventType.ERROR:
                                 ver = info_evt.payload.get("ver", "unknown")
-                                model = info_evt.payload.get("board_name", "unknown")
+                                model = info_evt.payload.get("model", "unknown")
                                 f.write(f"Device: {model}, FW: {ver}\n\n")
                             f.write(f"{proc['setup']}\n\n")
                             if insertion_loss > 0:
@@ -3666,7 +3666,7 @@ async def next_cmd(mc, cmds, json_output=False):
                                 f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                                 ev = await mc.commands.send_device_query()
                                 if ev.type != EventType.ERROR:
-                                    f.write(f"Device: {ev.payload.get('board_name','unknown')}, FW: {ev.payload.get('ver','unknown')}\n\n")
+                                    f.write(f"Device: {ev.payload.get('model','unknown')}, FW: {ev.payload.get('ver','unknown')}\n\n")
                                 f.write(f"txpower: -9, freq: {orig_freq} MHz, sf: {orig_sf}, cr: {orig_cr}, 50 ohm termination\n\n")
                                 f.write(f"{table}\n")
                             print(f"\nResults saved to {filename}")
@@ -3818,7 +3818,7 @@ async def next_cmd(mc, cmds, json_output=False):
                         model = "unknown"
                         if info_evt.type != EventType.ERROR:
                             ver = info_evt.payload.get("ver", "unknown")
-                            model = info_evt.payload.get("board_name", "unknown")
+                            model = info_evt.payload.get("model", "unknown")
 
                         png_file = asset_path(png_name)
                         xs = [p for p, _ in measurements]
