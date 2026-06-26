@@ -3881,6 +3881,8 @@ async def next_cmd(mc, cmds, json_output=False):
                     # 'measure cw'           -> default: RadioLib paOptTable (optimize=true)
                     # 'measure cw monotone'  -> fixed PA config (optimize=false, monotonic low end)
                     monotone = len(cmds) > 2 and cmds[2].lower() in ("monotone", "mono", "fixed", "false")
+                    if monotone:
+                        argnum = 2  # consume the 'monotone' modifier too
                     optimize = not monotone
                     opt_label = "optimize=false (fixed PA, monotone)" if monotone else "optimize=true (paOptTable)"
                     tag = "mono" if monotone else "opt"
