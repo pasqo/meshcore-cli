@@ -15,16 +15,16 @@ Connects to your companion client node (via BLE, TCP or serial without `-r`), th
 The transport between you and your companion node (BLE, TCP or serial) does not matter — all three use the same MeshCore API and the same mesh protocol to reach the repeater.
 
 <pre>
-                          +-------------------+
+                          +------------------+
   -r -s (serial)  ------->| Firmware text CLI |  (raw UART)
-                          |   on repeater     |
-                          +-------------------+
+                          |   on repeater    |
+                          +------------------+
 
-                            +--------------+        +-------------------+
-  BLE -----+                |              |  mesh  | Firmware mesh cmd |
-  TCP -----+--> MeshCore -->|  Companion   +------->| handler on        |
-  Serial --+   (same API)   |   node       |  radio | repeater          |
-                            +--------------+        +-------------------+
+                          +--------------+        +-------------------+
+  BLE -----+              |              |  mesh  | Firmware mesh cmd |
+  TCP -----+--> MeshCore --> Companion   +------->| handler on        |
+  Serial --+  (same API) |   node       |  radio | repeater          |
+                          +--------------+        +-------------------+
 </pre>
 
 ## Commands Available in Both Modes
