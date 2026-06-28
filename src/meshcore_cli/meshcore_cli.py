@@ -32,9 +32,7 @@ except ImportError:
 
 import re
 
-import struct
 from meshcore import MeshCore, EventType, logger
-from meshcore.events import Event
 
 # Version
 VERSION = "v1.5.7"
@@ -95,278 +93,6 @@ SLASH_END = f"{ANSI_RESET_BACK}"
 #SLASH_START = ""
 SLASH_START = f"{ANSI_GRAY_BACK}"
 INVERT_SLASH = False
-
-# Beebo: STATS_TYPE_SYSTEM (3) — not yet in the meshcore library.
-# We monkey-patch the reader to handle it and dispatch a custom event.
-STATS_TYPE_SYSTEM = 3
-STATS_TYPE_TRANSPORT = 4
-CMD_GET_STATS = 56
-STATS_SYSTEM_EVENT = "stats_system"
-STATS_TRANSPORT_EVENT = "stats_transport"
-
-TLOG_NAMES = {
-    1: "MULTI lock",
-    2: "MULTI release",
-    3: "MULTI disconnect",
-    4: "MULTI session lost",
-    5: "TCP enable",
-    6: "TCP disable",
-    7: "TCP new client",
-    8: "TCP session ON",
-    9: "TCP session OFF",
-    10: "TCP power ON",
-    11: "TCP power OFF",
-    12: "CMD recv",
-    13: "CMD done",
-    14: "WiFi STA disconnect",   # 802.11 link layer (under the TCP transport)
-    15: "WiFi STA got IP",
-    16: "BLE link UP",
-    17: "BLE link DOWN",
-    18: "──── debuglog read ────",
-    19: "COEX PREFER_WIFI",
-}
-
-# Event types whose detail byte is a companion command code (see CMD_NAMES).
-TLOG_CMD_EVENTS = (12, 13)
-
-# MULTI events (lock/release/disconnect/lost) carry a stable transport TYPE id
-# as detail (firmware TLOG_XPORT_*), so naming is correct regardless of which
-# transports are enabled.
-TLOG_MULTI_EVENTS = (1, 2, 3, 4)
-MULTI_TRANSPORT_NAMES = {1: "BLE", 2: "USB", 3: "TCP"}
-
-# WiFi STA disconnect reason codes (esp_wifi_types.h) — common subset.
-WIFI_REASON = {
-    1: "UNSPECIFIED", 2: "AUTH_EXPIRE", 3: "AUTH_LEAVE", 4: "ASSOC_EXPIRE",
-    5: "ASSOC_TOOMANY", 8: "ASSOC_LEAVE", 15: "4WAY_HANDSHAKE_TIMEOUT",
-    23: "802_1X_AUTH_FAILED", 200: "BEACON_TIMEOUT", 201: "NO_AP_FOUND",
-    202: "AUTH_FAIL", 203: "ASSOC_FAIL", 204: "HANDSHAKE_TIMEOUT",
-    205: "CONNECTION_FAIL", 206: "AP_TSF_RESET", 207: "ROAMING",
-}
-
-# Companion command bytes -> names (for CMD recv/done trace events). Mirrors the
-# CMD_* defines in the firmware; unknown bytes fall back to hex.
-CMD_NAMES = {
-    1: "APP_START", 2: "SEND_TXT_MSG", 3: "SEND_CHANNEL_TXT_MSG", 4: "GET_CONTACTS",
-    5: "GET_DEVICE_TIME", 6: "SET_DEVICE_TIME", 7: "SEND_SELF_ADVERT", 8: "SET_ADVERT_NAME",
-    9: "ADD_UPDATE_CONTACT", 10: "SYNC_NEXT_MESSAGE", 11: "SET_RADIO_PARAMS",
-    12: "SET_RADIO_TX_POWER", 13: "RESET_PATH", 14: "SET_ADVERT_LATLON", 16: "REMOVE_CONTACT",
-    17: "SHARE_CONTACT", 18: "EXPORT_CONTACT", 19: "IMPORT_CONTACT", 20: "REBOOT",
-    21: "GET_BATT_AND_STORAGE", 22: "DEVICE_QUERY", 23: "EXPORT_PRIVATE_KEY",
-    24: "IMPORT_PRIVATE_KEY", 25: "SEND_RAW_DATA", 26: "SEND_LOGIN", 27: "SEND_STATUS_REQ",
-    28: "HAS_CONNECTION", 29: "LOGOUT", 30: "GET_CONTACT_BY_KEY", 31: "GET_CHANNEL",
-    32: "SET_CHANNEL", 33: "SIGN_START", 34: "SIGN_DATA", 35: "SIGN_FINISH",
-    36: "SEND_TRACE_PATH", 37: "SET_DEVICE_PIN", 38: "SET_OTHER_PARAMS", 39: "SEND_TELEMETRY_REQ",
-    40: "GET_CUSTOM_VARS", 41: "SET_CUSTOM_VAR", 42: "GET_ADVERT_PATH", 43: "GET_TUNING_PARAMS",
-    44: "GET_RADIO_FEM_RXGAIN", 45: "SET_RADIO_FEM_RXGAIN", 46: "GET_RADIO_RXGAIN",
-    47: "SET_RADIO_RXGAIN", 48: "APP_DISCONNECT", 50: "SEND_BINARY_REQ", 51: "FACTORY_RESET",
-    52: "SEND_PATH_DISCOVERY_REQ", 54: "SET_FLOOD_SCOPE_KEY", 55: "SEND_CONTROL_DATA",
-    56: "GET_STATS", 57: "SEND_ANON_REQ", 58: "SET_AUTOADD_CONFIG", 59: "GET_AUTOADD_CONFIG",
-    60: "GET_ALLOWED_REPEAT_FREQ", 61: "SET_PATH_HASH_MODE", 62: "SEND_CHANNEL_DATA",
-    63: "SET_DEFAULT_FLOOD_SCOPE", 64: "GET_DEFAULT_FLOOD_SCOPE", 65: "SEND_RAW_PACKET",
-    128: "OTA_BEGIN", 129: "OTA_WRITE", 130: "OTA_END", 131: "SET_WIFI_CREDS",
-}
-
-def _patch_reader_for_beebo_stats(mc):
-    """Wrap the reader's handle_rx to intercept beebo-specific STATS responses."""
-    original_handle_rx = mc._reader.handle_rx
-
-    async def patched_handle_rx(data: bytearray):
-        if len(data) >= 16 and data[0] == 24 and data[1] == STATS_TYPE_SYSTEM:
-            try:
-                free_heap, free_psram, flash_size = struct.unpack('<I I I', data[2:14])
-                mcu_temp_scaled = struct.unpack('<h', data[14:16])[0]
-                res = {
-                    'free_heap': free_heap,
-                    'free_psram': free_psram,
-                    'flash_size': flash_size,
-                    'mcu_temp': mcu_temp_scaled / 10.0,
-                }
-                await mc.dispatcher.dispatch(Event(STATS_SYSTEM_EVENT, res))
-            except struct.error as e:
-                logger.error(f"Error parsing stats system frame: {e}")
-                await mc.dispatcher.dispatch(Event(EventType.ERROR, {"reason": f"binary_parse_error: {e}"}))
-        elif len(data) >= 6 and data[0] == 24 and data[1] == STATS_TYPE_TRANSPORT:
-            try:
-                total = struct.unpack('<H', data[2:4])[0]
-                offset = struct.unpack('<H', data[4:6])[0]
-                events = []
-                pos = 6
-                while pos + 6 <= len(data):
-                    ms = struct.unpack('<I', data[pos:pos+4])[0]
-                    etype = data[pos+4]
-                    detail = data[pos+5]  # raw byte; interpreted per event type
-                    events.append({'millis': ms, 'type': etype, 'detail': detail})
-                    pos += 6
-                await mc.dispatcher.dispatch(Event(STATS_TRANSPORT_EVENT,
-                                                   {'total': total, 'offset': offset, 'events': events}))
-            except struct.error as e:
-                logger.error(f"Error parsing transport log frame: {e}")
-                await mc.dispatcher.dispatch(Event(EventType.ERROR, {"reason": f"binary_parse_error: {e}"}))
-        else:
-            await original_handle_rx(data)
-
-    mc._reader.handle_rx = patched_handle_rx
-
-async def get_stats_system(mc):
-    """Send CMD_GET_STATS with STATS_TYPE_SYSTEM and wait for the response."""
-    cmd = bytes([CMD_GET_STATS, STATS_TYPE_SYSTEM])
-    return await mc.commands.send(cmd, [STATS_SYSTEM_EVENT, EventType.ERROR])
-
-async def get_stats_transport(mc, offset=0):
-    """Fetch one page of the debug ring starting at logical index `offset`."""
-    cmd = bytes([CMD_GET_STATS, STATS_TYPE_TRANSPORT, offset & 0xFF, (offset >> 8) & 0xFF])
-    return await mc.commands.send(cmd, [STATS_TRANSPORT_EVENT, EventType.ERROR])
-
-def signed_tx_power(v):
-    """The firmware stores tx_power as int8_t (-9..MAX), but it arrives in
-    self_info as an unsigned byte (e.g. -9 -> 247). Re-interpret as signed."""
-    return v - 256 if v is not None and v > 127 else v
-
-async def set_tx_power_signed(mc, val):
-    """Set radio TX power, supporting negative dBm values.
-
-    CMD_SET_RADIO_TX_POWER (0x0c): the firmware reads the low byte as int8_t
-    and accepts -9..MAX. The library helper set_tx_power() uses unsigned
-    to_bytes and raises OverflowError on negative values, so send signed
-    bytes directly (the low byte is identical for non-negative values).
-    """
-    return await mc.commands.send(
-        b"\x0c" + int(val).to_bytes(4, "little", signed=True),
-        [EventType.OK, EventType.ERROR])
-
-async def get_direct_tx_count(mc):
-    """Return the node's direct (zero-hop) TX counter, or None on error.
-
-    direct_tx in get_stats_packets() is incremented in Dispatcher::loop() only
-    *after* the radio reports the send finished — so it confirms a packet
-    actually went out over the air, not merely that the command was queued.
-    """
-    res = await mc.commands.get_stats_packets()
-    if res.type == EventType.ERROR:
-        return None
-    return res.payload.get("direct_tx")
-
-async def send_advert_confirmed(mc, timeout=5.0, poll=0.25):
-    """Send a zero-hop self-advert and confirm it was actually transmitted.
-
-    A zero-hop advert counts as a direct TX, so we snapshot direct_tx, issue
-    the advert, then poll until the counter increments (radio finished sending).
-    Returns True if transmission was confirmed, False otherwise.
-    """
-    before = await get_direct_tx_count(mc)
-    res = await mc.commands.send_advert()
-    if res.type == EventType.ERROR:
-        logger.warning(f"  advert command rejected: {res.payload}")
-        return False
-    if before is None:
-        logger.warning("  could not read direct_tx; advert queued but not confirmed")
-        return False
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(poll)
-        after = await get_direct_tx_count(mc)
-        if after is not None and after > before:
-            return True
-    logger.warning(f"  advert not confirmed within {timeout:.0f}s (direct_tx did not increment)")
-    return False
-
-async def send_advert_burst(mc, count=8, gap=0.6, timeout=5.0, poll=0.25):
-    """Send a sequence of confirmed adverts so a spectrum analyzer in max-hold
-    can accumulate the LoRa burst.
-
-    A single advert is a short chirped packet that a swept analyzer rarely
-    catches at its peak; sending several lets max-hold converge on the true
-    envelope. Each advert is confirmed over-air (direct_tx increments) before
-    the next is sent. Returns the number of adverts confirmed transmitted.
-    """
-    confirmed = 0
-    for i in range(count):
-        if await send_advert_confirmed(mc, timeout=timeout, poll=poll):
-            confirmed += 1
-        if i + 1 < count:
-            await asyncio.sleep(gap)
-    return confirmed
-
-ASSETS_DIR = "assets"
-
-def asset_path(name):
-    """Return <cwd>/assets/<name>, creating the assets dir on first use.
-
-    Keeps generated measurement artifacts (.md/.csv/.png) out of the repo root;
-    the assets dir is git-ignored.
-    """
-    os.makedirs(ASSETS_DIR, exist_ok=True)
-    return os.path.join(ASSETS_DIR, name)
-
-def save_measurement_chart(png_path, x, series, xlabel, ylabel, title, ideal_offset=None):
-    """Render a measurement chart to PNG for embedding in the markdown report.
-
-    x       : list of x values (e.g. set txpower in dBm)
-    series  : list of (label, yvalues) — yvalues aligned with x, None = gap
-    ideal_offset : if set, draw a dashed y = x + offset reference (ideal 1:1 gain)
-
-    Returns png_path on success, or None if matplotlib is unavailable (the
-    report is still written, just without the embedded image).
-    """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")   # headless: no display needed
-        import matplotlib.pyplot as plt
-        from matplotlib.ticker import AutoMinorLocator
-    except Exception as e:
-        logger.warning(f"matplotlib unavailable, skipping chart: {e}")
-        return None
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for label, ys in series:
-        xs = [xx for xx, yy in zip(x, ys) if yy is not None]
-        yy = [yv for yv in ys if yv is not None]
-        if xs:
-            ax.plot(xs, yy, marker="o", markersize=4, label=label)
-    if ideal_offset is not None and x:
-        lo, hi = min(x), max(x)
-        ax.plot([lo, hi], [lo + ideal_offset, hi + ideal_offset],
-                "--", color="gray", linewidth=1, label="ideal 1:1")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    # Minor ticks + a two-level grid so the saturation knee is easy to read off.
-    ax.xaxis.set_minor_locator(AutoMinorLocator())
-    ax.yaxis.set_minor_locator(AutoMinorLocator())
-    ax.grid(True, which="major", alpha=0.4)
-    ax.grid(True, which="minor", alpha=0.15, linewidth=0.5)
-    ax.tick_params(which="both")
-    ax.legend()
-    fig.tight_layout()
-    try:
-        fig.savefig(png_path, dpi=120)
-    except Exception as e:
-        logger.warning(f"could not write chart {png_path}: {e}")
-        png_path = None
-    finally:
-        plt.close(fig)
-    return png_path
-
-async def send_with_retry(send_factory, retries=3, label="command", delay=1.0):
-    """Await an Event-returning send coroutine, retrying transient timeouts.
-
-    `send_factory` is a zero-arg callable returning the awaitable (so each
-    retry issues a fresh send). Only retries on 'no_event_received'/'timeout'
-    (the symptoms of WiFi latency spikes); hard errors are returned as-is.
-    """
-    res = None
-    for attempt in range(1, retries + 1):
-        res = await send_factory()
-        if res.type != EventType.ERROR:
-            return res
-        reason = res.payload.get("reason") if isinstance(res.payload, dict) else None
-        if reason not in ("no_event_received", "timeout"):
-            return res  # genuine error — don't retry
-        if attempt < retries:
-            logger.warning(f"  {label} timed out, retry {attempt}/{retries - 1}...")
-            await asyncio.sleep(delay)
-    return res
 
 CMD_GET_TRANSPORT_CONFIG = 132
 CMD_SET_TRANSPORT_CONFIG = 133
@@ -805,7 +531,6 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
         "clock" : {"sync" : None},
         "reboot" : None,
         "ota" : None,
-        "debuglog" : None,
         "card" : None,
         "upload_card" : None,
         "contacts": None,
@@ -852,14 +577,6 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "pin" : None,
             "radio" : {",,,":None, "f,bw,sf,cr":None},
             "tx" : None,
-            "txpower" : None,
-            "radio.tx" : None,
-            "radio.txpower" : None,
-            "rxgain" : {"on":None, "off":None},
-            "radio.rxgain" : {"on":None, "off":None},
-            "fem.rxgain" : {"on":None, "off":None},
-            "radio.fem.rxgain" : {"on":None, "off":None},
-            "save_prefs" : {"on":None, "off":None, "restore":None, "commit":None},
             "tuning" : {",", "af,tx_d"},
             "lat" : None,
             "lon" : None,
@@ -897,15 +614,6 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "fstats": None,
             "radio":None,
             "tx":None,
-            "txpower":None,
-            "radio.tx":None,
-            "radio.txpower":None,
-            "radio.stats":None,
-            "rxgain":None,
-            "radio.rxgain":None,
-            "fem.rxgain":None,
-            "radio.fem.rxgain":None,
-            "save_prefs":None,
             "coords":None,
             "lat":None,
             "lon":None,
@@ -939,7 +647,6 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "stats_core":None,
             "stats_radio":None,
             "stats_packets":None,
-            "stats_system":None,
             "allowed_repeat_freq":None,
             "path_hash_mode":None,
             "default_scope":None,
@@ -1028,12 +735,7 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : None,
             "freq":None,
             "tx":None,
-            "txpower":None,
-            "radio.fem.rxgain":None,
-            "radio.rxgain":None,
             "af" : None,
-            "tuning" : None,
-            "save_prefs" : None,
             "repeat" : None,
             "allow.read.only" : None,
             "flood.advert.interval" : None,
@@ -1062,9 +764,6 @@ def make_completion_dict(contacts, pending={}, to=None, channels=None):
             "radio" : {",,,":None, "f,bw,sf,cr": None},
             "freq" : None,
             "tx" : None,
-            "txpower" : None,
-            "radio.fem.rxgain" : {"on":None, "off":None},
-            "radio.rxgain" : {"on":None, "off":None},
             "af": None,
             "repeat" : {"on": None, "off": None},
             "flood.advert.interval" : None,
@@ -1157,14 +856,18 @@ Some cmds have an help accessible with ?<cmd>. Do ?[Tab] to get a list.
 
     contact = to
     prev_contact = None
-    _msg_subscribed = False
 
     scope = await set_scope(mc, "*")
     prev_scope = scope
 
     await get_contacts(mc, anim=True)
     await get_channels(mc, anim=True)
+
+    # Call sync_msg before going further so there is no issue when scrolling
+    # long list of msgs
     await next_cmd(mc, ["sync_msgs"])
+
+    await subscribe_to_msgs(mc, above=True)
 
     try:
         if os.path.isdir(MCCLI_CONFIG_DIR) :
@@ -1194,12 +897,6 @@ Some cmds have an help accessible with ?<cmd>. Do ?[Tab] to get a list.
         last_ack = True
         while True:
             # reset scope (if changed)
-            # Subscribe to messages the first time a contact/channel is selected
-            if contact is not None and not _msg_subscribed:
-                await subscribe_to_msgs(mc, above=True)
-                _msg_subscribed = True
-                await next_cmd(mc, ["sync_msgs"])
-
             scope = await set_scope(mc, scope)
 
             color = process_event_message.color
@@ -2198,7 +1895,6 @@ async def get_contact_from_arg(mc, arg):
 async def next_cmd(mc, cmds, json_output=False):
     """ process next command """
     global ARROW_HEAD, SLASH_START, SLASH_END, INVERT_SLASH
-    _cmd_t0 = time.monotonic()
     try :
         argnum = 0
 
@@ -2417,50 +2113,15 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(res.payload, indent=4))
                         else:
                             print("ok")
-                    case "tx" | "txpower" | "radio.tx" | "radio.txpower":
-                        try:
-                            tx_val = int(cmds[2])
-                        except ValueError:
-                            print(f"Error: invalid txpower '{cmds[2]}' (expected integer dBm)")
-                        else:
-                            res = await set_tx_power_signed(mc, tx_val)
-                            logger.debug(res)
-                            if res.type == EventType.ERROR:
-                                print(f"Error: {res}")
-                            elif json_output :
-                                print(json.dumps({cmds[1]: tx_val}))
-                            else:
-                                print("ok")
-                    case "fem.rxgain" | "radio.fem.rxgain":
-                        val = 1 if cmds[2] == "on" else 0
-                        res = await mc.commands.send(b"\x2d" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
-                        if res.type == EventType.ERROR:
-                            print("Error: unsupported by this board")
-                        elif json_output:
-                            print(json.dumps({cmds[1]: "on" if val else "off"}))
-                        else:
-                            print("ok")
-                    case "rxgain" | "radio.rxgain":
-                        val = 1 if cmds[2] == "on" else 0
-                        res = await mc.commands.send(b"\x2f" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
+                    case "tx":
+                        res = await mc.commands.set_tx_power(cmds[2])
+                        logger.debug(res)
                         if res.type == EventType.ERROR:
                             print(f"Error: {res}")
-                        elif json_output:
-                            print(json.dumps({cmds[1]: "on" if val else "off"}))
+                        elif json_output :
+                            print(json.dumps(res.payload, indent=4))
                         else:
                             print("ok")
-                    case "save_prefs":
-                        val = {"off": 0, "on": 1, "restore": 2, "commit": 3}.get(cmds[2])
-                        if val is None:
-                            print("Error: save_prefs takes on, off, restore, or commit")
-                        else:
-                            res = await mc.commands.send(b"\x87" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR])
-                            if res.type == EventType.ERROR:
-                                print(f"Error: {res}")
-                            elif json_output:
-                                print(json.dumps({cmds[1]: cmds[2]}))
-                            else:
-                                print("ok")
                     case "lat":
                         if "adv_lon" in mc.self_info :
                             lon = mc.self_info['adv_lon']
@@ -2620,34 +2281,6 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(f"Error: {res}")
                         else:
                             print(f"WiFi credentials saved ({ssid}).")
-                    case "ble" | "tcp" | "usb":  # beebo: enable/disable a transport (persisted)
-                        cfg = await get_transport_config(mc)
-                        if cfg is None:
-                            print("Error: transport config unsupported by this firmware")
-                        else:
-                            ble_en, tcp_en, usb_en = cfg
-                            on = cmds[2] == "on"
-                            if cmds[1] == "ble":
-                                ble_en = on
-                            elif cmds[1] == "tcp":
-                                tcp_en = on
-                            else:
-                                usb_en = on
-                            res = await set_transport_config(mc, ble_en, tcp_en, usb_en)
-                            if res.type == EventType.ERROR:
-                                print(f"Error: {res}")
-                            else:
-                                # Re-read: the node may have overridden us to keep
-                                # at least one remote transport on.
-                                cfg2 = await get_transport_config(mc) or (ble_en, tcp_en, usb_en)
-                                b, t, u = cfg2
-                                if json_output:
-                                    print(json.dumps({"ble": bool(b), "tcp": bool(t), "usb": bool(u)}))
-                                else:
-                                    print(f"ble={'on' if b else 'off'}, tcp={'on' if t else 'off'}, "
-                                          f"usb={'on' if u else 'off'} — reboot to apply")
-                                    if on != (b if cmds[1]=='ble' else t if cmds[1]=='tcp' else u):
-                                        print("  (kept a remote transport on to avoid lockout)")
                     case _: # custom var
                         if cmds[1].startswith("_") :
                             vname = cmds[1][1:]
@@ -2666,36 +2299,6 @@ async def next_cmd(mc, cmds, json_output=False):
                 match cmds[1]:
                     case "help":
                         get_help_for("get")
-                    case "ble" | "tcp" | "usb" | "transport":  # beebo: transport enable flags
-                        cfg = await get_transport_config(mc)
-                        if cfg is None:
-                            print("Error: transport config unsupported by this firmware")
-                        else:
-                            ble_en, tcp_en, usb_en = cfg
-                            if json_output:
-                                print(json.dumps({"ble": bool(ble_en), "tcp": bool(tcp_en), "usb": bool(usb_en)}))
-                            elif cmds[1] == "ble":
-                                print("on" if ble_en else "off")
-                            elif cmds[1] == "tcp":
-                                print("on" if tcp_en else "off")
-                            elif cmds[1] == "usb":
-                                print("on" if usb_en else "off")
-                            else:
-                                print(f"ble={'on' if ble_en else 'off'}, tcp={'on' if tcp_en else 'off'}, "
-                                      f"usb={'on' if usb_en else 'off'}")
-                    case "tuning":
-                        res = await mc.commands.get_tuning()
-                        if res.type == EventType.ERROR:
-                            print(f"Error: {res}")
-                        else:
-                            rx_delay = res.payload["rx_delay"]
-                            airtime_factor = res.payload["airtime_factor"]
-                            if json_output:
-                                print(json.dumps({"rx_delay": rx_delay,
-                                                  "airtime_factor": airtime_factor}))
-                            else:
-                                print(f"rx_delay: {rx_delay} (range 0-20000), "
-                                      f"airtime_factor: {airtime_factor} (range 0-9000)")
                     case "max_flood_attempts":
                         if json_output :
                             print(json.dumps({"max_flood_attempts" : msg_ack.max_flood_attempts}))
@@ -2772,43 +2375,12 @@ async def next_cmd(mc, cmds, json_output=False):
                             print(json.dumps(mc.self_info["name"]))
                         else:
                             print(mc.self_info["name"])
-                    case "tx" | "txpower" | "radio.tx" | "radio.txpower":
+                    case "tx":
                         await mc.commands.send_appstart()
-                        tx = signed_tx_power(mc.self_info["tx_power"])
                         if json_output :
-                            print(json.dumps({cmds[1]: tx}))
+                            print(json.dumps(mc.self_info["tx_power"]))
                         else:
-                            print(tx)
-                    case "fem.rxgain" | "radio.fem.rxgain":
-                        res = await mc.commands.send(b"\x2c", [EventType.OK, EventType.ERROR])
-                        if res.type == EventType.ERROR:
-                            print("Error: unsupported by this board")
-                        else:
-                            val = res.payload.get("value", 0)
-                            if json_output:
-                                print(json.dumps({cmds[1]: "on" if val else "off"}))
-                            else:
-                                print("on" if val else "off")
-                    case "rxgain" | "radio.rxgain":
-                        res = await mc.commands.send(b"\x2e", [EventType.OK, EventType.ERROR])
-                        if res.type == EventType.ERROR:
-                            print(f"Error: {res}")
-                        else:
-                            val = res.payload.get("value", 0)
-                            if json_output:
-                                print(json.dumps({cmds[1]: "on" if val else "off"}))
-                            else:
-                                print("on" if val else "off")
-                    case "save_prefs":
-                        res = await mc.commands.send(b"\x86", [EventType.OK, EventType.ERROR])
-                        if res.type == EventType.ERROR:
-                            print(f"Error: {res}")
-                        else:
-                            val = res.payload.get("value", 0)
-                            if json_output:
-                                print(json.dumps({cmds[1]: "on" if val else "off"}))
-                            else:
-                                print("on" if val else "off")
+                            print(mc.self_info["tx_power"])
                     case "coords":
                         await mc.commands.send_appstart()
                         if json_output :
@@ -2963,7 +2535,7 @@ async def next_cmd(mc, cmds, json_output=False):
                             logger.error("Couldn't get stats")
                         else:
                             print(json.dumps(res.payload, indent=4))
-                    case "stats_radio" | "radio.stats":
+                    case "stats_radio":
                         res = await mc.commands.get_stats_radio()
                         logger.debug(res)
                         if res.type == EventType.ERROR:
@@ -2977,16 +2549,10 @@ async def next_cmd(mc, cmds, json_output=False):
                             logger.error("Couldn't get stats")
                         else:
                             print(json.dumps(res.payload, indent=4))
-                    case "stats_system":
-                        res = await get_stats_system(mc)
-                        logger.debug(res)
-                        if res.type == EventType.ERROR:
-                            logger.error("Couldn't get system stats (firmware may not support STATS_TYPE_SYSTEM)")
-                        else:
-                            print(json.dumps(res.payload, indent=4))
                     case "stats"|"status":
                         stats = {}
                         res = await mc.commands.get_stats_core()
+                        stats.update(res.payload)
                         if res.type == EventType.ERROR:
                             logger.error("Couldn't get core stats")
                         else:
@@ -2999,11 +2565,6 @@ async def next_cmd(mc, cmds, json_output=False):
                         res = await mc.commands.get_stats_packets()
                         if res.type == EventType.ERROR:
                             logger.error("Couldn't get packets stats")
-                        else:
-                            stats.update(res.payload)
-                        res = await get_stats_system(mc)
-                        if res.type == EventType.ERROR:
-                            logger.debug("System stats not available (firmware may not support STATS_TYPE_SYSTEM)")
                         else:
                             stats.update(res.payload)
                         print(json.dumps(stats, indent=4))
@@ -3038,109 +2599,6 @@ async def next_cmd(mc, cmds, json_output=False):
                                     print(json.dumps({"var" : vname, "value" : val}))
                                 else:
                                     print(val)
-
-            case "uptime":
-                dev = await mc.commands.send_device_query()
-                core = await mc.commands.get_stats_core()
-                radio = await mc.commands.get_stats_radio()
-                sys_stats = await get_stats_system(mc)
-                if dev.type == EventType.ERROR:
-                    print(f"ERROR: {dev}")
-                else:
-                    p = dev.payload
-                    print(f" Model:       {p.get('model', '?')}")
-                    print(f" Version:     {p.get('ver', '?')}")
-                    print(f" Build:       {p.get('fw_build', '?')}")
-                    if core.type != EventType.ERROR:
-                        c = core.payload
-                        secs = c['uptime_secs']
-                        days, rem = divmod(secs, 86400)
-                        hours, rem = divmod(rem, 3600)
-                        mins, s = divmod(rem, 60)
-                        parts = []
-                        if days:
-                            parts.append(f"{days}d")
-                        if hours:
-                            parts.append(f"{hours}h")
-                        if mins:
-                            parts.append(f"{mins}m")
-                        parts.append(f"{s}s")
-                        print(f" Uptime:      {' '.join(parts)}")
-                        bat = c['battery_mv']
-                        if bat > 0:
-                            print(f" Battery:     {bat / 1000:.2f} V")
-                        print(f" Queue:       {c['queue_len']} packets")
-                        print(f" Errors:      {c['errors']}")
-                    if radio.type != EventType.ERROR:
-                        r = radio.payload
-                        print(f" Noise floor: {r['noise_floor']} dBm")
-                        print(f" Last RSSI:   {r['last_rssi']} dBm")
-                        print(f" Last SNR:    {r['last_snr']:.1f} dB")
-                        print(f" TX airtime:  {r['tx_air_secs']} s")
-                        print(f" RX airtime:  {r['rx_air_secs']} s")
-                    await mc.commands.send_appstart()
-                    if 'tx_power' in mc.self_info:
-                        print(f" TX power:    {signed_tx_power(mc.self_info['tx_power'])} dBm")
-                    rxgain_res = await mc.commands.send(b"\x2e", [EventType.OK, EventType.ERROR])
-                    if rxgain_res.type != EventType.ERROR:
-                        print(f" RX boosted:  {'on' if rxgain_res.payload.get('value', 0) else 'off'}")
-                    fem_res = await mc.commands.send(b"\x2c", [EventType.OK, EventType.ERROR])
-                    if fem_res.type != EventType.ERROR:
-                        print(f" LNA enabled: {'on' if fem_res.payload.get('value', 0) else 'off'}")
-                    if sys_stats.type != EventType.ERROR:
-                        s = sys_stats.payload
-                        print(f" Free heap:   {s['free_heap'] / 1024:.0f} kB")
-                        print(f" Free PSRAM:  {s['free_psram'] / 1024:.0f} kB")
-                        print(f" Flash:       {s['flash_size'] / (1024 * 1024):.0f} MB")
-                        print(f" MCU temp:    {s['mcu_temp']:.1f} °C")
-
-            case "debuglog":
-                # Paginate the ring: keep fetching pages until we've collected
-                # `total` events (the firmware skips logging these fetches, so
-                # the ring stays stable across pages).
-                events = []
-                total = None
-                offset = 0
-                while True:
-                    res = await get_stats_transport(mc, offset)
-                    if res.type == EventType.ERROR:
-                        break
-                    total = res.payload.get('total', 0)
-                    page = res.payload.get('events', [])
-                    if not page:
-                        break
-                    events.extend(page)
-                    offset += len(page)
-                    if offset >= total:
-                        break
-                if total is None:
-                    print("Transport log not available (firmware may not support STATS_TYPE_TRANSPORT)")
-                elif not events:
-                    print(" No transport events recorded.")
-                else:
-                    t0 = events[0]['millis']
-                    print(f" {'Uptime':>13s}   {'Delta':>12s}   Event")
-                    print(f" {'─'*13}   {'─'*12}   {'─'*28}")
-                    prev = t0
-                    for ev in events:
-                        ms = ev['millis']
-                        secs = ms / 1000.0
-                        delta = (ms - prev) / 1000.0
-                        name = TLOG_NAMES.get(ev['type'], f"unknown({ev['type']})")
-                        detail = ev['detail']
-                        if ev['type'] in TLOG_CMD_EVENTS:
-                            cmd_name = CMD_NAMES.get(detail, "")
-                            detail_str = f" 0x{detail:02x}" + (f" {cmd_name}" if cmd_name else "")
-                        elif ev['type'] == 14:  # WiFi STA disconnect — detail is reason code
-                            reason = WIFI_REASON.get(detail, "")
-                            detail_str = f" reason={detail}" + (f" {reason}" if reason else "")
-                        elif ev['type'] in TLOG_MULTI_EVENTS:  # detail = transport index
-                            tname = MULTI_TRANSPORT_NAMES.get(detail, f"idx{detail}")
-                            detail_str = f" [{tname}]"
-                        else:
-                            detail_str = f" [{detail}]" if detail != 0 else ""
-                        print(f" {secs:>12.3f}s   {delta:>+11.3f}s   {name}{detail_str}")
-                        prev = ms
 
             case "self_telemetry" | "t":
                 res = await mc.commands.get_self_telemetry()
@@ -3217,24 +2675,12 @@ async def next_cmd(mc, cmds, json_output=False):
             case "ota":
                 argnum = 2
                 fw_file = cmds[1]
-                OTA_DEFAULT_BUF_KB = 0
-                buf_kb = OTA_DEFAULT_BUF_KB
-                if len(cmds) >= 3:
-                    try:
-                        buf_kb = int(cmds[2])
-                        if buf_kb < 0:
-                            print("Buffer size must be >= 0 kB")
-                            buf_kb = -1
-                    except ValueError:
-                        print(f"Invalid buffer size: {cmds[2]}")
-                        buf_kb = -1
                 fw_data = None
-                if buf_kb >= 0:
-                    try:
-                        with open(fw_file, "rb") as f:
-                            fw_data = f.read()
-                    except OSError as e:
-                        print(f"Error reading firmware file: {e}")
+                try:
+                    with open(fw_file, "rb") as f:
+                        fw_data = f.read()
+                except OSError as e:
+                    print(f"Error reading firmware file: {e}")
                 if fw_data is not None:
                     from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
                     info_evt = await mc.commands.send_device_query()
@@ -3242,15 +2688,11 @@ async def next_cmd(mc, cmds, json_output=False):
                     basename = os.path.splitext(os.path.basename(fw_file))[0]
                     new_ver = basename.split("-", 2)[-1] if basename.count("-") >= 2 else basename
                     total = len(fw_data)
-                    buf_pct = min(buf_kb * 1024 * 100 // total, 100) if buf_kb > 0 else 0
-                    if buf_pct == 0:
-                        print(f"OTA upload: {fw_file} ({total} bytes, streaming)")
-                    else:
-                        print(f"OTA upload: {fw_file} ({total} bytes, {buf_kb} kB buffer)")
+                    print(f"OTA upload: {fw_file} ({total} bytes, streaming)")
                     print(f"  {old_ver}  →  {new_ver}")
                     ota_start_time = time.monotonic()
                     begin_evt = await mc.commands.send(
-                        b"\x80" + total.to_bytes(4, "little") + buf_pct.to_bytes(1, "little"),
+                        b"\x80" + total.to_bytes(4, "little") + (0).to_bytes(1, "little"),
                         [EventType.OTA_BEGIN, EventType.ERROR],
                     )
                     if begin_evt.type == EventType.ERROR:
@@ -3267,14 +2709,10 @@ async def next_cmd(mc, cmds, json_output=False):
                             TimeRemainingColumn(),
                         ) as progress:
                             finalize_size = total // 100 or 1
-                            buf_cap = total * buf_pct // 100 if buf_pct > 0 else 0
-                            bytes_in_buf = 0
                             task = progress.add_task("Transfer ...", total=total)
                             for idx in range(0, total, chunk_size):
                                 chunk = fw_data[idx : idx + chunk_size]
                                 chunk_num = (idx // chunk_size) + 1
-                                if buf_cap > 0 and bytes_in_buf + len(chunk) >= buf_cap:
-                                    progress.update(task, description="Flashing ...")
                                 evt = await mc.commands.ota_write(chunk)
                                 if evt.type == EventType.ERROR:
                                     if evt.payload.get("reason") == "no_event_received":
@@ -3285,11 +2723,6 @@ async def next_cmd(mc, cmds, json_output=False):
                                         print(f"OTA failed at chunk {chunk_num}/{total_chunks}: {evt.payload}")
                                         failed = True
                                         break
-                                if buf_cap > 0:
-                                    bytes_in_buf += len(chunk)
-                                    if bytes_in_buf >= buf_cap:
-                                        bytes_in_buf -= buf_cap
-                                        progress.update(task, description="Transfer ...")
                                 advance = len(chunk)
                                 if progress.tasks[task].completed + advance >= total - finalize_size:
                                     advance = max(0, total - finalize_size - int(progress.tasks[task].completed))
@@ -3309,686 +2742,6 @@ async def next_cmd(mc, cmds, json_output=False):
                         if not failed:
                             elapsed = int(time.monotonic() - ota_start_time)
                             print(f"OTA completed in {elapsed}s — rebooting into {new_ver}.")
-
-            case "measure":
-                argnum = 1
-                if len(cmds) < 2:
-                    print("Usage: measure noise_internal | noise_combined | noise_in_band | rssi_bw_sweep | txpower_curve | cw [monotone]")
-                elif cmds[1] in ("noise_internal", "noise_combined", "noise_in_band"):
-                    import datetime
-                    noise_test = cmds[1]
-
-                    async def sample_noise_floor(mc, n=5, interval=2.5):
-                        # The firmware already reports a 64-sample average that it
-                        # recomputes ~every 2s (NOISE_FLOOR_CALIB_INTERVAL). So we
-                        # only take a few reads spaced >= that interval to get
-                        # genuinely independent averages; reading faster just
-                        # returns the same cached value. A 0 reading means the
-                        # floor hasn't reconverged yet (e.g. just after resetAGC)
-                        # — retry rather than count it.
-                        # Returns (min, max) so the caller can report the
-                        # spike-free floor (min) alongside the spread, or None.
-                        samples = []
-                        attempts = 0
-                        max_attempts = n + 5
-                        while len(samples) < n and attempts < max_attempts:
-                            if attempts > 0:
-                                await asyncio.sleep(interval)
-                            attempts += 1
-                            res = await send_with_retry(lambda: mc.commands.get_stats_radio(),
-                                                        label="noise read")
-                            if res.type == EventType.ERROR:
-                                logger.error(f"Failed to read noise floor: {res.payload}")
-                                continue  # transient — keep trying within max_attempts
-                            nf = res.payload["noise_floor"]
-                            if nf == 0:
-                                logger.info(f"  (skipping uncalibrated 0 reading)")
-                                continue
-                            samples.append(nf)
-                            logger.info(f"  Sample {len(samples)}/{n}: noise_floor = {nf} dBm")
-                        if not samples:
-                            logger.error("  No valid noise floor readings (floor never calibrated)")
-                            return None
-                        nf_min = min(samples)
-                        nf_max = max(samples)
-                        logger.info(f"  min={nf_min} max={nf_max} dBm")
-                        return (nf_min, nf_max)
-
-                    async def set_rxgain(mc, on):
-                        val = 1 if on else 0
-                        res = await send_with_retry(
-                            lambda: mc.commands.send(b"\x2f" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR]),
-                            label="set rxgain")
-                        if res.type == EventType.ERROR:
-                            logger.error(f"Failed to set rxgain: {res.payload}")
-                            return False
-                        logger.info(f"  rxgain = {'on' if on else 'off'}")
-                        return True
-
-                    async def set_fem_rxgain(mc, on):
-                        val = 1 if on else 0
-                        res = await send_with_retry(
-                            lambda: mc.commands.send(b"\x2d" + val.to_bytes(1, "little"), [EventType.OK, EventType.ERROR]),
-                            label="set fem.rxgain")
-                        if res.type == EventType.ERROR:
-                            logger.error(f"Failed to set fem.rxgain: {res.payload}")
-                            return False
-                        logger.info(f"  fem.rxgain = {'on' if on else 'off'}")
-                        return True
-
-                    procedures = {
-                        "noise_internal": {
-                            "title": "Internal Noise Floor Measurement",
-                            "subtitle": "noise floor (50 ohm stub)",
-                            "setup": "txpower: -9, 50 ohm termination",
-                            "steps": [
-                                "With the antenna still connected, set TX power to -9 to protect the termination stub: set radio.txpower -9",
-                                "Power off board",
-                                "Replace antenna with 50 ohm termination stub",
-                                "Power on board",
-                                "Run the test: measure noise_internal",
-                                "Power off board",
-                                "Replace stub with antenna",
-                                "Set radio.txpower to original value",
-                            ],
-                        },
-                        "noise_combined": {
-                            "title": "Combined Noise Floor Measurement",
-                            "subtitle": "noise floor (antenna, in-band + out-of-band)",
-                            "setup": "txpower: -9, antenna connected",
-                            "steps": [
-                                "set radio.txpower to -9",
-                                "Connect the real antenna (not 50 ohm stub)",
-                                "Power on board",
-                                "Run this test",
-                                "Repeat test if needed",
-                            ],
-                            "notes": [
-                                "Noise floor is sampled during idle gaps between packets",
-                                "(firmware filters out active reception automatically).",
-                                "Compare with noise_internal to see environmental noise contribution.",
-                            ],
-                        },
-                        "noise_in_band": {
-                            "title": "In-Band Noise Floor Measurement",
-                            "subtitle": "noise floor (antenna + bandpass filter, in-band only)",
-                            "setup": "txpower: -9, antenna + bandpass filter",
-                            "steps": [
-                                "set radio.txpower to -9",
-                                "Power off board",
-                                "Connect bandpass filter between antenna and board RF port",
-                                "Power on board",
-                                "Run this test",
-                                "Repeat test if needed",
-                                "Power off board",
-                                "Remove bandpass filter, reconnect antenna directly",
-                            ],
-                            "notes": [
-                                "Noise excess over noise_internal is due to in-band signals only.",
-                                "Compare with noise_combined to compute out-of-band noise:",
-                                "  out_of_band = noise_combined - noise_in_band",
-                            ],
-                        },
-                    }
-                    proc = procedures[noise_test]
-
-                    print(f"{proc['title']} Procedure:")
-                    for i, step in enumerate(proc["steps"], 1):
-                        print(f"  {i}. {step}")
-                    if "notes" in proc:
-                        print()
-                        for note in proc["notes"]:
-                            print(f"  {note}")
-                    print()
-                    insertion_loss = 0.0
-                    if noise_test == "noise_in_band":
-                        while True:
-                            raw = input("  Enter bandpass filter insertion loss (dB, e.g. 1.5): ").strip()
-                            try:
-                                insertion_loss = float(raw)
-                                break
-                            except ValueError:
-                                print("  Invalid input, enter a number")
-                        print()
-                    input("  Press Enter to start the test...")
-                    print()
-
-                    configs = [
-                        ("off", "off"),
-                        ("on",  "off"),
-                        ("on",  "on"),
-                        ("off", "on"),
-                    ]
-                    results = []
-
-                    logger.info("Setup: verifying txpower is at -9 (minimum)")
-                    # Tolerate WiFi latency spikes during the idle measurement
-                    # gaps by raising the per-command timeout (restored below).
-                    _saved_timeout = mc.commands.default_timeout
-                    mc.commands.default_timeout = 30
-                    # The user is expected to set txpower to -9 before the test
-                    # (to protect the termination stub); we only verify it here
-                    # rather than changing it.
-                    info_evt = await mc.commands.send_device_query()
-                    cur_tx = signed_tx_power(mc.self_info["tx_power"]) if info_evt.type != EventType.ERROR else None
-                    if cur_tx != -9:
-                        mc.commands.default_timeout = _saved_timeout
-                        if cur_tx is None:
-                            print(f"Error reading txpower: {info_evt.payload}")
-                        else:
-                            print(f"Error: txpower is {cur_tx} dBm, expected -9. Run 'set radio.txpower -9' before this test (protects the termination stub).")
-                    else:
-                        print(f"{proc['title']}")
-                        print(f"  txpower = -9, sampling 5 firmware averages per config\n")
-
-                        for rxgain_str, fem_str in configs:
-                            rxgain_on = rxgain_str == "on"
-                            fem_on = fem_str == "on"
-                            logger.info(f"Config: rxgain={rxgain_str}, fem.rxgain={fem_str}")
-                            ok = await set_rxgain(mc, rxgain_on)
-                            if ok:
-                                ok = await set_fem_rxgain(mc, fem_on)
-                            if not ok:
-                                results.append((rxgain_str, fem_str, None))
-                                continue
-                            await asyncio.sleep(5.0)
-                            vals = await sample_noise_floor(mc)
-                            results.append((rxgain_str, fem_str, vals))
-
-                        mc.commands.default_timeout = _saved_timeout
-
-                        # Build markdown table. `min` is the reported (spike-free)
-                        # noise floor; `avg`/`max` show the spread — a large
-                        # spread indicates intermittent interference.
-                        lines = []
-                        if insertion_loss > 0:
-                            lines.append("| rxgain | fem.rxgain | min (dBm) | max (dBm) | corr. min (dBm) |")
-                            lines.append("|--------|------------|-----------|-----------|-----------------|")
-                            for rxgain_str, fem_str, vals in results:
-                                if vals is not None:
-                                    nf_min, nf_max = vals
-                                    corr = round(nf_min + insertion_loss)
-                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {nf_min:>9d} | {nf_max:>9d} | {corr:>15d} |")
-                                else:
-                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {'ERROR':>9} | {'—':>9} | {'—':>15} |")
-                        else:
-                            lines.append("| rxgain | fem.rxgain | min (dBm) | max (dBm) |")
-                            lines.append("|--------|------------|-----------|-----------|")
-                            for rxgain_str, fem_str, vals in results:
-                                if vals is not None:
-                                    nf_min, nf_max = vals
-                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {nf_min:>9d} | {nf_max:>9d} |")
-                                else:
-                                    lines.append(f"| {rxgain_str:<6} | {fem_str:<10} | {'ERROR':>9} | {'—':>9} |")
-                        table = "\n".join(lines)
-
-                        print(f"\n{table}")
-
-                        # Write to file
-                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = asset_path(f"{noise_test}_{ts}.md")
-                        with open(filename, "w") as f:
-                            f.write(f"# {proc['title']}\n\n")
-                            f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                            info_evt = await mc.commands.send_device_query()
-                            if info_evt.type != EventType.ERROR:
-                                ver = info_evt.payload.get("ver", "unknown")
-                                model = info_evt.payload.get("model", "unknown")
-                                f.write(f"Device: {model}, FW: {ver}\n\n")
-                            f.write(f"{proc['setup']}\n\n")
-                            if insertion_loss > 0:
-                                f.write(f"Bandpass filter insertion loss: {insertion_loss:.1f} dB\n\n")
-                            f.write(f"{table}\n")
-                        print(f"\nResults saved to {filename}")
-
-                elif cmds[1] == "rssi_bw_sweep":
-                    import datetime
-                    import math
-
-                    # Sweeps the LoRa bandwidth with a 50 ohm stub attached to
-                    # find out how the reported noise floor scales with BW.
-                    # Thermal noise is -174 + 10*log10(BW), so if RssiInst
-                    # integrates over the LoRa signal bandwidth the floor should
-                    # rise ~3 dB per BW doubling; if RssiInst is a fixed wideband
-                    # IF measurement (or carries a fixed calibration offset) the
-                    # floor stays put. This discriminates a bandwidth effect from
-                    # a fixed RSSI reference offset in the N_floor reconciliation.
-                    print("RSSI Bandwidth Sweep Procedure:")
-                    print("  1. With the antenna still connected, set TX power to -9: set radio.txpower -9")
-                    print("  2. Power off board")
-                    print("  3. Replace antenna with 50 ohm termination stub")
-                    print("  4. Power on board")
-                    print("  5. Run this test: measure rssi_bw_sweep")
-                    print("  6. Power off board, replace stub with antenna, restore txpower")
-                    print()
-                    print("  BW is changed live and restored at the end; freq/sf/cr are preserved.")
-                    print()
-                    input("  Press Enter to start the test...")
-                    print()
-
-                    info_evt = await mc.commands.send_device_query()
-                    if info_evt.type == EventType.ERROR:
-                        print(f"Error reading radio params: {info_evt.payload}")
-                    else:
-                        orig_freq = mc.self_info["radio_freq"]
-                        orig_bw   = mc.self_info["radio_bw"]
-                        orig_sf   = mc.self_info["radio_sf"]
-                        orig_cr   = mc.self_info["radio_cr"]
-                        cur_tx = signed_tx_power(mc.self_info["tx_power"])
-
-                        if cur_tx != -9:
-                            print(f"Error: txpower is {cur_tx} dBm, expected -9. Run 'set radio.txpower -9' before this test (protects the termination stub).")
-                        else:
-                            # Tolerate WiFi latency spikes (restored below).
-                            _saved_timeout = mc.commands.default_timeout
-                            mc.commands.default_timeout = 30
-
-                            # Hold the per-BW radio-param writes in RAM (no flash
-                            # thrash); 'restore' below reloads the original prefs.
-                            ns_res = await mc.commands.send(b"\x87\x00", [EventType.OK, EventType.ERROR])
-                            prefs_held = ns_res.type != EventType.ERROR
-                            if prefs_held:
-                                logger.info("save_prefs set to off for the test (pref writes held in RAM)")
-
-                            async def sample_floor(n=5, interval=2.5):
-                                # Firmware reports a 64-sample average recomputed
-                                # ~every 2s; space reads >= that interval. Returns
-                                # (min, max) or None. 0 = floor not yet converged.
-                                samples = []
-                                attempts = 0
-                                while len(samples) < n and attempts < n + 5:
-                                    if attempts > 0:
-                                        await asyncio.sleep(interval)
-                                    attempts += 1
-                                    res = await send_with_retry(lambda: mc.commands.get_stats_radio(),
-                                                                label="noise read")
-                                    if res.type == EventType.ERROR:
-                                        continue
-                                    nf = res.payload["noise_floor"]
-                                    if nf == 0:
-                                        logger.info("  (skipping uncalibrated 0 reading)")
-                                        continue
-                                    samples.append(nf)
-                                    logger.info(f"  Sample {len(samples)}/{n}: noise_floor = {nf} dBm")
-                                if not samples:
-                                    return None
-                                return (min(samples), max(samples))
-
-                            bw_list = [62.5, 125.0, 250.0, 500.0]
-                            results = []
-                            print("RSSI Bandwidth Sweep")
-                            print(f"  txpower = -9, freq = {orig_freq} MHz, sf = {orig_sf}, cr = {orig_cr}\n")
-                            for bw in bw_list:
-                                logger.info(f"Config: bw = {bw} kHz")
-                                res = await mc.commands.set_radio(orig_freq, bw, orig_sf, orig_cr)
-                                if res.type == EventType.ERROR:
-                                    logger.error(f"Failed to set bw={bw}: {res.payload}")
-                                    results.append((bw, None))
-                                    continue
-                                # let the radio re-enter RX and the floor reconverge
-                                await asyncio.sleep(8.0)
-                                vals = await sample_floor()
-                                results.append((bw, vals))
-
-                            logger.info(f"Restoring radio: bw={orig_bw} kHz")
-                            await mc.commands.set_radio(orig_freq, orig_bw, orig_sf, orig_cr)
-                            if prefs_held:
-                                await mc.commands.send(b"\x87\x02", [EventType.OK, EventType.ERROR])
-                                logger.info("save_prefs restore: prefs reloaded from flash")
-                            mc.commands.default_timeout = _saved_timeout
-
-                            # reference = narrowest BW with a valid reading
-                            ref_bw = next((b for b, v in results if v is not None), None)
-                            ref_min = next((v[0] for b, v in results if v is not None), None)
-
-                            lines = []
-                            lines.append("| bw (kHz) | min (dBm) | max (dBm) | Δ meas (dB) | Δ thermal (dB) |")
-                            lines.append("|----------|-----------|-----------|-------------|----------------|")
-                            for bw, vals in results:
-                                if vals is not None:
-                                    nf_min, nf_max = vals
-                                    d_meas = nf_min - ref_min if ref_min is not None else 0
-                                    d_therm = round(10.0 * math.log10(bw / ref_bw), 1) if ref_bw else 0.0
-                                    lines.append(f"| {bw:<8.1f} | {nf_min:>9d} | {nf_max:>9d} | {d_meas:>+11d} | {d_therm:>+14.1f} |")
-                                else:
-                                    lines.append(f"| {bw:<8.1f} | {'ERROR':>9} | {'—':>9} | {'—':>11} | {'—':>14} |")
-                            table = "\n".join(lines)
-                            print(f"\n{table}")
-                            print()
-                            print("  If Δ meas tracks Δ thermal, RssiInst integrates over the LoRa BW")
-                            print("  (re-reference N_thermal per BW). If Δ meas stays ~0, the offset is a")
-                            print("  fixed IF/calibration constant independent of LoRa bandwidth.")
-
-                            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                            filename = asset_path(f"rssi_bw_sweep_{ts}.md")
-                            with open(filename, "w") as f:
-                                f.write("# RSSI Bandwidth Sweep\n\n")
-                                f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                                ev = await mc.commands.send_device_query()
-                                if ev.type != EventType.ERROR:
-                                    f.write(f"Device: {ev.payload.get('model','unknown')}, FW: {ev.payload.get('ver','unknown')}\n\n")
-                                f.write(f"txpower: -9, freq: {orig_freq} MHz, sf: {orig_sf}, cr: {orig_cr}, 50 ohm termination\n\n")
-                                f.write(f"{table}\n")
-                            print(f"\nResults saved to {filename}")
-
-                elif cmds[1] == "txpower_curve":
-                    import datetime
-
-                    # Adverts per power level: a swept analyzer in max-hold needs
-                    # several bursts to converge on the true LoRa envelope.
-                    ADVERT_BURST_COUNT = 8
-
-                    print("TX Power Measurement Procedure:")
-                    print("  1. Power off board and tinySA Ultra+")
-                    print("  2. Connect antenna output to tinySA RF input through 50 dB attenuator")
-                    print("  3. Turn on and configure tinySA Ultra+ (see README)")
-                    print("  4. Turn on board")
-                    print("  5. Run this test (measure txpower_curve)")
-                    print("  6. At each power level, read the peak on tinySA and enter the value")
-                    print()
-                    input("  Press Enter to start the test...")
-                    print()
-
-                    # Hold pref persistence off for the whole test so the many
-                    # tx-power / tuning changes stay in RAM (no flash thrash).
-                    # 'save_prefs restore' in finally reloads the original state.
-                    prefs_held = False
-                    ns_res = await mc.commands.send(b"\x87\x00", [EventType.OK, EventType.ERROR])
-                    if ns_res.type != EventType.ERROR:
-                        prefs_held = True
-                        logger.info("save_prefs set to off for the test (pref writes held in RAM)")
-                    else:
-                        logger.warning("Could not turn save_prefs off; prefs will persist on each change")
-
-                    # Disable the duty-cycle airtime budget for the duration of
-                    # the bench test so repeated adverts (incl. 'r') transmit
-                    # immediately instead of being deferred. Restored at the end.
-                    orig_tuning = None
-                    tune_evt = await mc.commands.get_tuning()
-                    if tune_evt.type != EventType.ERROR:
-                        orig_tuning = (tune_evt.payload["rx_delay"], tune_evt.payload["airtime_factor"])
-                        if orig_tuning[1] != 0:
-                            await mc.commands.set_tuning(orig_tuning[0], 0)
-                            logger.info(f"airtime_factor set to 0 (was {orig_tuning[1] / 1000.0:.1f}) for the test")
-                    else:
-                        logger.warning("Could not read tuning params; airtime budget left unchanged")
-
-                    measurements = []
-                    try:
-                        for pwr in range(-9, 23):
-                            logger.info(f"Setting txpower = {pwr}")
-                            res = await set_tx_power_signed(mc, pwr)
-                            if res.type == EventType.ERROR:
-                                print(f"Error setting txpower to {pwr}: {res.payload}")
-                                break
-                            await asyncio.sleep(1.0)
-                            logger.info(f"Sending advert burst at txpower = {pwr}")
-                            n_ok = await send_advert_burst(mc, count=ADVERT_BURST_COUNT)
-                            if n_ok:
-                                logger.info(f"  {n_ok}/{ADVERT_BURST_COUNT} adverts TX confirmed at txpower = {pwr}")
-                            else:
-                                print(f"  WARNING: no adverts confirmed at txpower = {pwr}")
-                            while True:
-                                raw = input(f"  txpower={pwr:>2} — enter tinySA reading (dBm), 'r' to repeat burst, 's' to skip, 'q' to quit: ").strip()
-                                if raw.lower() == 'q':
-                                    break
-                                if raw.lower() == 'r':
-                                    logger.info(f"Re-sending advert burst at txpower = {pwr}")
-                                    n_ok = await send_advert_burst(mc, count=ADVERT_BURST_COUNT)
-                                    if n_ok:
-                                        logger.info(f"  {n_ok}/{ADVERT_BURST_COUNT} adverts TX confirmed at txpower = {pwr}")
-                                    else:
-                                        print(f"  WARNING: no adverts confirmed at txpower = {pwr}")
-                                    continue
-                                if raw.lower() == 's':
-                                    measurements.append((pwr, None))
-                                    logger.info(f"  txpower={pwr}: skipped")
-                                    break
-                                try:
-                                    measured = float(raw)
-                                    measurements.append((pwr, measured))
-                                    logger.info(f"  txpower={pwr}: measured = {measured:.1f} dBm")
-                                    break
-                                except ValueError:
-                                    print("  Invalid input, enter a number, 's' to skip, or 'q' to quit")
-                            else:
-                                continue
-                            if raw.lower() == 'q':
-                                break
-                    finally:
-                        # Always restore the original airtime budget, even on
-                        # Ctrl-C / exception mid-test.
-                        if orig_tuning is not None and orig_tuning[1] != 0:
-                            await mc.commands.set_tuning(orig_tuning[0], orig_tuning[1])
-                            logger.info(f"airtime_factor restored to {orig_tuning[1] / 1000.0:.1f}")
-                        # Reload prefs from flash: restores tx power, airtime_factor
-                        # and radio params to their pre-test state and re-enables saving.
-                        if prefs_held:
-                            await mc.commands.send(b"\x87\x02", [EventType.OK, EventType.ERROR])
-                            logger.info("save_prefs restore: prefs reloaded from flash")
-
-                    if measurements:
-                        # Compute gain (measured - set) and find P1dB
-                        # Use ideal 1:1 slope: gain should be constant
-                        # Reference gain from the first valid measurement
-                        valid = [(p, m) for p, m in measurements if m is not None]
-                        ref_gain = None
-                        ref_pwr = None
-                        if valid:
-                            ref_pwr = valid[0][0]
-                            ref_gain = valid[0][1] - valid[0][0]
-
-                        p1db_pwr = None
-                        if ref_gain is not None:
-                            for pwr, measured in valid:
-                                gain = measured - pwr
-                                compression = ref_gain - gain
-                                if compression >= 1.0:
-                                    p1db_pwr = pwr
-                                    break
-
-                        # Build markdown table
-                        lines = []
-                        lines.append("| txpower | measured (dBm) | gain (dB) | compression (dB) |")
-                        lines.append("|---------|----------------|-----------|------------------|")
-                        for pwr, measured in measurements:
-                            if measured is not None:
-                                gain = measured - pwr
-                                comp = ref_gain - gain if ref_gain is not None else 0
-                                lines.append(f"| {pwr:>7} | {measured:>14.1f} | {gain:>9.1f} | {comp:>16.1f} |")
-                            else:
-                                lines.append(f"| {pwr:>7} | {'skipped':>14} | {'—':>9} | {'—':>16} |")
-                        table = "\n".join(lines)
-
-                        print(f"\n{table}")
-                        if p1db_pwr is not None:
-                            print(f"\nP1dB point: txpower = {p1db_pwr} (compression >= 1 dB)")
-                        elif ref_gain is not None:
-                            print(f"\nP1dB point: not reached (max compression < 1 dB)")
-                        print(f"Reference gain: {ref_gain:.1f} dB (from txpower={ref_pwr})")
-
-                        # Write files
-                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        png_name = f"txpower_curve_{ts}.png"
-                        md_file = asset_path(f"txpower_curve_{ts}.md")
-                        csv_file = asset_path(f"txpower_curve_{ts}.csv")
-
-                        info_evt = await mc.commands.send_device_query()
-                        ver = "unknown"
-                        model = "unknown"
-                        if info_evt.type != EventType.ERROR:
-                            ver = info_evt.payload.get("ver", "unknown")
-                            model = info_evt.payload.get("model", "unknown")
-
-                        png_file = asset_path(png_name)
-                        xs = [p for p, _ in measurements]
-                        ys = [m for _, m in measurements]
-                        chart = save_measurement_chart(
-                            png_file, xs, [("measured", ys)],
-                            "set txpower (dBm)", "measured (dBm)",
-                            f"TX Power Curve — {model} {ver}",
-                            ideal_offset=ref_gain)
-
-                        with open(md_file, "w") as f:
-                            f.write(f"# TX Power Measurement\n\n")
-                            f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                            f.write(f"Device: {model}, FW: {ver}\n\n")
-                            if chart:
-                                f.write(f"![TX power curve]({png_name})\n\n")
-                            f.write(f"{table}\n")
-                            if p1db_pwr is not None:
-                                f.write(f"\nP1dB point: txpower = {p1db_pwr}\n")
-                            f.write(f"\nReference gain: {ref_gain:.1f} dB (from txpower={ref_pwr})\n")
-
-                        with open(csv_file, "w") as f:
-                            f.write("txpower,measured_dBm,gain_dB,compression_dB\n")
-                            for pwr, measured in measurements:
-                                if measured is not None:
-                                    gain = measured - pwr
-                                    comp = ref_gain - gain if ref_gain is not None else 0
-                                    f.write(f"{pwr},{measured:.1f},{gain:.1f},{comp:.1f}\n")
-                                else:
-                                    f.write(f"{pwr},,,\n")
-
-                        if chart:
-                            print(f"\nResults saved to {md_file}, {csv_file} and {png_file}")
-                        else:
-                            print(f"\nResults saved to {md_file} and {csv_file}")
-
-                elif cmds[1] == "cw":
-                    import datetime
-
-                    # Continuous-wave power sweep: keys a steady unmodulated
-                    # carrier at each level so a spectrum analyzer reads a
-                    # rock-steady peak (no burst/sweep-sync jitter). Mirrors
-                    # txpower_curve but with a carrier instead of adverts.
-                    CW_DWELL_SECS = 30   # max carrier-on time per level (FW auto-stops)
-
-                    async def cw_start(secs):
-                        return await mc.commands.send(
-                            bytes([0x88, 0x01, secs & 0xFF, (secs >> 8) & 0xFF]),
-                            [EventType.OK, EventType.ERROR])
-
-                    async def cw_stop():
-                        return await mc.commands.send(
-                            bytes([0x88, 0x00]), [EventType.OK, EventType.ERROR])
-
-                    async def set_optimize(on):
-                        # CMD_SET_TX_OPTIMIZE = 137 (0x89): 1=paOptTable, 0=fixed/monotonic
-                        return await mc.commands.send(
-                            bytes([0x89, 0x01 if on else 0x00]), [EventType.OK, EventType.ERROR])
-
-                    # 'measure cw'           -> default: RadioLib paOptTable (optimize=true)
-                    # 'measure cw monotone'  -> fixed PA config (optimize=false, monotonic low end)
-                    monotone = len(cmds) > 2 and cmds[2].lower() in ("monotone", "mono", "fixed", "false")
-                    if monotone:
-                        argnum = 2  # consume the 'monotone' modifier too
-                    optimize = not monotone
-                    opt_label = "optimize=false (fixed PA, monotone)" if monotone else "optimize=true (paOptTable)"
-                    tag = "mono" if monotone else "opt"
-
-                    print(f"CW (continuous-wave) Power Measurement [{opt_label}]:")
-                    print("  Same setup as txpower_curve (antenna -> attenuator -> tinySA).")
-                    print("  A steady carrier is keyed at each level; read the peak, then")
-                    print(f"  it auto-stops after {CW_DWELL_SECS}s (or when you answer).")
-                    print()
-                    input("  Press Enter to start the test...")
-                    print()
-
-                    prefs_held = False
-                    ns_res = await mc.commands.send(b"\x87\x00", [EventType.OK, EventType.ERROR])
-                    if ns_res.type != EventType.ERROR:
-                        prefs_held = True
-                        logger.info("save_prefs set to off for the test (pref writes held in RAM)")
-
-                    if (await set_optimize(optimize)).type == EventType.ERROR:
-                        print(f"  WARNING: set {opt_label} rejected by firmware")
-
-                    measurements = []
-                    try:
-                        for pwr in range(-9, 23):
-                            logger.info(f"Setting txpower = {pwr}")
-                            res = await set_tx_power_signed(mc, pwr)
-                            if res.type == EventType.ERROR:
-                                print(f"Error setting txpower to {pwr}: {res.payload}")
-                                break
-                            await asyncio.sleep(0.3)
-                            if (await cw_start(CW_DWELL_SECS)).type == EventType.ERROR:
-                                print(f"  WARNING: CW start rejected at txpower = {pwr}")
-                            else:
-                                logger.info(f"  CW carrier ON at txpower = {pwr}")
-                            try:
-                                while True:
-                                    raw = input(f"  [{tag}] txpower={pwr:>2} — tinySA reading (dBm), 'r' re-key, 's' skip, 'q' quit: ").strip()
-                                    if raw.lower() == 'q':
-                                        break
-                                    if raw.lower() == 'r':
-                                        await cw_start(CW_DWELL_SECS)
-                                        logger.info(f"  CW re-keyed at txpower = {pwr}")
-                                        continue
-                                    if raw.lower() == 's':
-                                        measurements.append((pwr, None))
-                                        break
-                                    try:
-                                        measurements.append((pwr, float(raw)))
-                                        logger.info(f"  txpower={pwr}: measured = {float(raw):.1f} dBm")
-                                        break
-                                    except ValueError:
-                                        print("  Invalid input, enter a number, 's' to skip, or 'q' to quit")
-                            finally:
-                                await cw_stop()
-                            if raw.lower() == 'q':
-                                break
-                    finally:
-                        await cw_stop()   # belt-and-suspenders: never leave the PA keyed
-                        await set_optimize(True)   # restore firmware default PA optimization
-                        if prefs_held:
-                            await mc.commands.send(b"\x87\x02", [EventType.OK, EventType.ERROR])
-                            logger.info("save_prefs restore: prefs reloaded from flash")
-
-                    if measurements:
-                        valid = [(p, m) for p, m in measurements if m is not None]
-                        ref_gain = (valid[0][1] - valid[0][0]) if valid else None
-                        ref_pwr = valid[0][0] if valid else None
-                        lines = ["| txpower | measured (dBm) | gain (dB) | compression (dB) |",
-                                 "|---------|----------------|-----------|------------------|"]
-                        for pwr, measured in measurements:
-                            if measured is not None:
-                                gain = measured - pwr
-                                comp = ref_gain - gain if ref_gain is not None else 0
-                                lines.append(f"| {pwr:>7} | {measured:>14.1f} | {gain:>9.1f} | {comp:>16.1f} |")
-                            else:
-                                lines.append(f"| {pwr:>7} | {'skipped':>14} | {'—':>9} | {'—':>16} |")
-                        table = "\n".join(lines)
-                        print(f"\n{table}")
-                        if ref_gain is not None:
-                            print(f"Reference gain: {ref_gain:.1f} dB (from txpower={ref_pwr})")
-                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        png_name = f"cw_curve_{tag}_{ts}.png"
-                        md_file = asset_path(f"cw_curve_{tag}_{ts}.md")
-                        png_file = asset_path(png_name)
-                        xs = [p for p, _ in measurements]
-                        ys = [m for _, m in measurements]
-                        chart = save_measurement_chart(
-                            png_file, xs, [("measured", ys)],
-                            "set txpower (dBm)", "measured (dBm)",
-                            f"CW Power Curve [{opt_label}]",
-                            ideal_offset=ref_gain)
-                        with open(md_file, "w") as f:
-                            f.write(f"# CW Power Measurement [{opt_label}]\n\n")
-                            f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                            if chart:
-                                f.write(f"![CW power curve]({png_name})\n\n")
-                            f.write(f"{table}\n")
-                            if ref_gain is not None:
-                                f.write(f"\nReference gain: {ref_gain:.1f} dB (from txpower={ref_pwr})\n")
-                        if chart:
-                            print(f"\nResults saved to {md_file} and {png_file}")
-                        else:
-                            print(f"\nResults saved to {md_file}")
-
-                else:
-                    print(f"Unknown measurement: {cmds[1]}")
 
             case "msg" | "m" | "{" : # sends to a contact from name
                 argnum = 2
@@ -4901,26 +3654,6 @@ async def next_cmd(mc, cmds, json_output=False):
                 else:
                     print("Advert sent")
 
-            case "tx_cw" | "cw" :
-                # beebo: key a steady CW carrier at the current txpower for N
-                # seconds (default 10). Firmware auto-stops at the deadline; we
-                # also send an explicit stop. CMD_SET_CW = 136 (0x88).
-                secs = int(cmds[1]) if len(cmds) > 1 else 10
-                res = await mc.commands.send(
-                    bytes([0x88, 0x01, secs & 0xFF, (secs >> 8) & 0xFF]),
-                    [EventType.OK, EventType.ERROR])
-                if res.type == EventType.ERROR:
-                    print(f"Error starting CW: {res.payload}")
-                else:
-                    print(f"CW carrier ON for {secs}s — reading the peak now...")
-                    try:
-                        await asyncio.sleep(secs)
-                    except (KeyboardInterrupt, asyncio.CancelledError):
-                        print("\nInterrupted — stopping carrier.")
-                    finally:
-                        await mc.commands.send(bytes([0x88, 0x00]), [EventType.OK, EventType.ERROR])
-                    print("CW carrier OFF")
-
             case "sleep" | "s" :
                 argnum = 1
                 await asyncio.sleep(int(cmds[1]))
@@ -4998,8 +3731,7 @@ async def next_cmd(mc, cmds, json_output=False):
 
                 await interactive_loop(mc, to=contact)
 
-        _cmd_elapsed = time.monotonic() - _cmd_t0
-        logger.debug(f"cmd {cmds[0:argnum+1]} processed in {_cmd_elapsed:.3f}s")
+        logger.debug(f"cmd {cmds[0:argnum+1]} processed ...")
         return cmds[argnum+1:]
 
     except IndexError:
@@ -5048,17 +3780,8 @@ def command_help():
     card                   : export this node URI                   e
     ver                    : firmware version                       v
     reboot                 : reboots node
-    measure noise_internal : internal noise floor (50 ohm stub)
-    measure noise_combined : combined noise floor (antenna)
-    measure noise_in_band  : in-band noise floor (antenna + BPF)
-    measure rssi_bw_sweep  : noise floor vs LoRa bandwidth (50 ohm stub)
-    measure txpower_curve  : TX power curve, P1dB compression (advert bursts)
-    measure cw [monotone]  : TX power curve via CW carrier; bare=paOptTable (default), 'monotone'=fixed PA
-    tx_cw [secs]           : key a steady CW carrier at current txpower for secs (default 10)  cw
-    ota <fw.bin> [buf_kB]  : upload firmware OTA; buf_kB = PSRAM buffer
-                             in kB (default 512, 0=stream)
-                             default: 100
-    set wifi <ssid> <pwd>  : provision WiFi credentials (beebo)
+    ota <fw.bin>           : upload firmware OTA
+    set wifi <ssid> <pwd>  : provision WiFi credentials
     sleep <secs>           : sleeps for a given amount of secs      s
     wait_key               : wait until user presses <Enter>        wk
     apply_to <f> <cmds>    : sends cmds to contacts matching f      at
@@ -5196,11 +3919,7 @@ def get_help_for (cmdname, context="line") :
     lat                : latitude
     lon                : longitude
     radio              : radio parameters
-    tuning             : tuning params (rx_delay_base, airtime_factor)
     tx                 : tx power
-    rxgain             : SX1262 RX boosted gain on/off (alias: radio.rxgain)
-    fem.rxgain         : KCT8103L FEM LNA state, V4.3 only (alias: radio.fem.rxgain)
-    save_prefs         : pref-persistence state (on=persisting, off=RAM only) [beebo]
     private_key        : private key of the node
     print_snr          : snr display in messages
     print_adverts      : display adverts as they come
@@ -5208,13 +3927,10 @@ def get_help_for (cmdname, context="line") :
     print_path_updates : display path updates as they come
     custom             : all custom variables in json format
                 each custom var can also be get/set directly
-    uptime             : device info + all stats, formatted with units
     stats/status       : print status of the node
     stats_core         : core stats (bat/error/uptime/queue)
     stats_radio        : radio stats (noise/rssi/snr/tx_air/rx_air)
     stats_packets      : packets stats (recv/sent/flood/direct)
-    stats_system       : system stats (heap/psram/flash/temp) [beebo]
-    debuglog           : transport event log (lock/release/WiFi state) [beebo]
     allowed_repeat_freq: possible frequency ranges for repeater mode
     path_hash_mode
 """)
@@ -5226,9 +3942,6 @@ def get_help_for (cmdname, context="line") :
     radio <freq,bw,sf,cr>       : radio params
     tuning <rx_dly,af>          : tuning params
     tx <dbm>                    : tx power
-    rxgain <on/off>             : SX1262 RX boosted gain (alias: radio.rxgain)
-    fem.rxgain <on/off>         : KCT8103L FEM LNA, V4.3 only (alias: radio.fem.rxgain)
-    save_prefs <on/off/restore/commit> : off=hold pref changes in RAM (no flash); on=resume saving; restore=reload from flash; commit=write current state now [beebo]
     name <name>                 : node name
     lat <lat>                   : latitude
     lon <lon>                   : longitude
@@ -5436,7 +4149,7 @@ REPEATER_COMMANDS = {
     "clear": {"stats": None},
     "log": {"start": None, "stop": None, "erase": None},
     "get": {
-        "name": None, "radio": None, "tx": None, "txpower": None, "freq": None,
+        "name": None, "radio": None, "tx": None, "freq": None,
         "public.key": None, "prv.key": None, "repeat": None, "role": None,
         "lat": None, "lon": None, "af": None,
         "rxdelay": None, "txdelay": None, "direct.txdelay": None,
@@ -5451,7 +4164,7 @@ REPEATER_COMMANDS = {
         "owner.info": None,
     },
     "set": {
-        "name": None, "radio": None, "tx": None, "txpower": None, "freq": None,
+        "name": None, "radio": None, "tx": None, "freq": None,
         "prv.key": None, "repeat": {"on": None, "off": None},
         "lat": None, "lon": None, "af": None,
         "rxdelay": None, "txdelay": None, "direct.txdelay": None,
@@ -5487,7 +4200,6 @@ REPEATER_HELP = f"""
   clock               - Show current time
 
 {ANSI_BGREEN}Stats:{ANSI_END}
-  uptime              - Device info + all stats with units
   stats-core          - Core stats (uptime, battery, queue)
   stats-radio         - Radio stats (RSSI, SNR, noise floor)
   stats-packets       - Packet statistics (sent/recv counts)
@@ -5506,14 +4218,14 @@ REPEATER_HELP = f"""
 {ANSI_BGREEN}Configuration (get/set):{ANSI_END}
   get name            - Node name
   get radio           - Radio params (freq,bw,sf,cr)
-  get tx|txpower      - TX power (dBm)
+  get tx              - TX power (dBm)
   get repeat          - Repeat mode on/off
   get public.key      - Node public key
   get advert.interval - Advertisement interval (minutes)
   get owner.info      - Owner information
 
   set name <name>     - Set node name
-  set tx|txpower <p>  - Set TX power (dBm)
+  set tx <power>      - Set TX power (dBm)
   set repeat on|off   - Enable/disable repeating
   set radio f,bw,sf,cr - Set radio params (reboot to apply)
   set advert.interval <min> - Set advert interval (60-240 min)
@@ -5959,12 +4671,6 @@ async def main(argv):
 
     if (debug==True):
         logger.setLevel(logging.DEBUG)
-        logger.propagate = False
-        logger.handlers.clear()
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d %(levelname)s:%(name)s:%(message)s',
-                                               datefmt='%H:%M:%S'))
-        logger.addHandler(handler)
     elif (json_output or quiet) :
         logger.setLevel(logging.ERROR)
 
@@ -5988,32 +4694,13 @@ async def main(argv):
         logger.info(f"{ANSI_BGRAY}Disconnected from repeater.{ANSI_END}")
         return
 
-    _t0 = time.monotonic()
-    def _phase(label):
-        logger.debug(f"TIMING {label}: {time.monotonic() - _t0:.3f}s")
-
     mc = None
     if not hostname is None : # connect via tcp
-        delays = [1.0, 2.0, 3.0]   # retry up to 3 times with increasing delays
-        for attempt, delay in enumerate(delays, 1):
-            try:
-                _phase(f"tcp connect attempt {attempt}")
-                mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=(json_output or quiet))
-                _phase("tcp connected + appstart done")
-                break
-            except OSError as e:
-                _phase(f"tcp connect failed: {e}")
-                if attempt == len(delays):
-                    print(f"Could not connect to {hostname}:{port} — {e}")
-                    print("The node may already have an active companion session (phone app, another CLI).")
-                    print("Disconnect the other client and try again.")
-                    return
-                await asyncio.sleep(delay)
+        mc = await MeshCore.create_tcp(host=hostname, port=port, debug=debug, only_error=json_output)
     elif not serial_port is None : # connect via serial port
-        mc = await MeshCore.create_serial(port=serial_port, baudrate=baudrate, debug=debug, only_error=(json_output or quiet))
+        mc = await MeshCore.create_serial(port=serial_port, baudrate=baudrate, debug=debug, only_error=json_output)
         if mc is None: # did not connect
-            print(f"Could not connect via serial port {serial_port}.")
-            print("The node may already have an active companion session, or use -r for repeaters.")
+            logger.error("To connect to a repeater, use -r option.")
     elif BLEAK_AVAILABLE : # connect via ble
         client = None
         if device or address and len(address.split(":")) == 6 :
@@ -6049,22 +4736,15 @@ async def main(argv):
                     break
 
             if not found :
-                print(f"Could not find BLE device{' matching ' + address if address else ''}.")
-                print("If using multi-transport firmware, the node may have an active session on another transport.")
-                print("Disconnect the other client and try again.")
+                logger.info(f"Couldn't find device {address}")
                 return
 
         try :
-            mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=(json_output or quiet), pin=pin)
-        except (BleakError, BleakDBusError, OSError) as e:
-            if isinstance(e, OSError) and not isinstance(e, (BleakError, BleakDBusError)):
-                print(f"BLE connection failed: {e}")
-                print("The device may have rejected the connection (stale pairing, auth failure).")
-                print("Try removing the device from Windows Bluetooth settings and re-pairing.")
-            else:
-                print("BLE connection asked (default behaviour), but no BLE HW found")
-                print("Call meshcore-cli with -h for some more help (on commands)")
-                command_usage()
+            mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=json_output, pin=pin)
+        except (BleakError, BleakDBusError):
+            print("BLE connection asked (default behaviour), but no BLE HW found")
+            print("Call meshcore-cli with -h for some more help (on commands)")
+            command_usage()
             return
         except ConnectionError :
             logger.info("Error while connecting, retrying once ...")
@@ -6088,21 +4768,12 @@ async def main(argv):
                         found = True
                         break
                 if not found :
-                    print(f"Could not find BLE device{' matching ' + address if address else ''}.")
-                    print("If using multi-transport firmware, the node may have an active session on another transport.")
-                    print("Disconnect the other client and try again.")
+                    logger.info(f"Couldn't find device {address}")
                     return
             try :
-                mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=(json_output or quiet), pin=pin)
-            except (ConnectionError, OSError) as e:
-                if isinstance(e, OSError) and not isinstance(e, ConnectionError):
-                    print(f"BLE connection failed: {e}")
-                    print("The device may have rejected the connection (stale pairing, auth failure).")
-                    print("Try removing the device from Windows Bluetooth settings and re-pairing.")
-                else:
-                    print("Could not connect to BLE device.")
-                    print("The node may already have an active companion session.")
-                    print("Disconnect the other client and try again.")
+                mc = await MeshCore.create_ble(address=address, device=device, client=client, debug=debug, only_error=json_output, pin=pin)
+            except ConnectionError :
+                logger.error("Can't connect to node, exiting")
                 return
 
 
@@ -6122,8 +4793,6 @@ async def main(argv):
     handle_path_update.mc = mc
     handle_log_rx.mc = mc
 
-    _patch_reader_for_beebo_stats(mc)
-
     mc.subscribe(EventType.ADVERTISEMENT, handle_advert)
     mc.subscribe(EventType.PATH_UPDATE, handle_path_update)
     mc.subscribe(EventType.NEW_CONTACT, handle_new_contact)
@@ -6132,26 +4801,10 @@ async def main(argv):
     mc.auto_update_contacts = True
     mc.set_decrypt_channel_logs(True)
 
-    _phase("device_query start")
     res = await mc.commands.send_device_query()
-    _phase("device_query done")
     if res.type == EventType.ERROR :
         logger.error(f"Error while querying device: {res}")
         return
-
-    _phase("set_time start")
-    await mc.commands.set_time(int(time.time()))
-    _phase("set_time done")
-
-    # beebo: turn pref-persistence OFF on connect so an interactive CLI session
-    # can't inadvertently write settings to flash. The user must explicitly
-    # commit (save_prefs commit / save_prefs on) to persist a change. Restored
-    # to ON in the finally below so companion-app default behavior is unchanged.
-    try:
-        await mc.commands.send(b"\x87\x00", [EventType.OK, EventType.ERROR])
-        logger.debug("save_prefs set to off for this CLI session (changes held in RAM)")
-    except Exception as e:
-        logger.debug(f"Could not turn save_prefs off on connect: {e}")
 
     if os.path.isdir(MCCLI_CONFIG_DIR) :
         log_message.file = MCCLI_CONFIG_DIR + (mc.self_info["name"].replace("/","")) + ".msgs"
@@ -6175,40 +4828,12 @@ async def main(argv):
     else:
         logger.debug(f"No device init script for {mc.self_info['name']}")
 
-    try:
-        if len(args) == 0 : # no args, run in chat mode
-            await process_cmds(mc, ["chat"], json_output)
-        else:
-            await process_cmds(mc, args, json_output)
-    finally:
-        # beebo: restore pref-persistence to ON so the node behaves as a
-        # companion app expects (save-on-by-default) after the CLI leaves.
-        try:
-            await mc.commands.send(b"\x87\x01", [EventType.OK, EventType.ERROR])
-            logger.debug("save_prefs restored to on at exit")
-        except Exception as e:
-            logger.debug(f"Could not restore save_prefs on at exit: {e}")
-        logger.debug("Disconnecting...")
-        from meshcore.ble_cx import BLEConnection
-        if sys.platform == "win32" and isinstance(mc.connection_manager.connection, BLEConnection):
-            try:
-                CMD_APP_DISCONNECT = 48
-                logger.debug("Sending BLE disconnect command to device...")
-                await mc.connection_manager.connection.send(bytes([CMD_APP_DISCONNECT]))
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                logger.debug(f"Disconnect command failed: {e}")
-        await mc.disconnect()
-        logger.debug("Disconnected.")
+    if len(args) == 0 : # no args, run in chat mode
+        await process_cmds(mc, ["chat"], json_output)
+    else:
+        await process_cmds(mc, args, json_output)
 
 def cli():
-    # Force UTF-8 on stdout/stderr so non-ASCII output (box-drawing, em-dash,
-    # arrows) works on Windows (cp1252) too, including when redirected to a file.
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(encoding="utf-8")
-        except Exception:
-            pass
     try:
         asyncio.run(main(sys.argv[1:]))
     except KeyboardInterrupt:
